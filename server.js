@@ -1,6 +1,6 @@
 require("dotenv").config();
 
-const express = require("express"); 
+const express = require("express");
 const cors = require("cors");
 const { Pool } = require("pg");
 
@@ -67,7 +67,7 @@ app.get("/api/db-test", async (req, res) => {
     res.status(500).json({
       ok: false,
       database: "connection_failed"
-    });https://github.com/salervai/ddr-backend/blob/2ef4e22b90b74da83926a16f576d5a4e0fb031d9/server.js
+    });
   }
 });
 
@@ -85,15 +85,6 @@ app.use((err, req, res, next) => {
     ok: false,
     error: "Internal server error"
   });
-
-
-
-
-
-
-
-
-  
 });
 
 app.listen(PORT, "0.0.0.0", () => {
