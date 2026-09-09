@@ -220,7 +220,7 @@ app.post("/api/auth/telegram", async (req, res) => {
         telegramUser.photo_url || null
       ]
     );
-
+console.log("Telegram auth success");
     res.json({
       ok: true,
       user: result.rows[0]
