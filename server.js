@@ -5,6 +5,19 @@ const cors = require("cors");
 const crypto = require("crypto");
 const { Pool } = require("pg");
 
+// ============================================================
+// ADMIN CONTROL CENTER MODULE
+// ============================================================
+
+const {
+  ensureControlCenterDatabase,
+  registerAdminControlCenter
+} = require("./admin_control_center");
+
+// ============================================================
+// APP
+// ============================================================
+
 const app = express();
 const PORT = process.env.PORT || 10000;
 
@@ -40,6 +53,20 @@ const pool = new Pool({
   ssl: {
     rejectUnauthorized: false
   }
+});
+
+// ============================================================
+// REGISTER ADMIN CONTROL CENTER
+// ============================================================
+// IMPORTANT:
+// This must be registered before the 404 middleware.
+// ============================================================
+
+registerAdminControlCenter({
+  app,
+  pool,
+  adminKey: ADMIN_KEY,
+  jwtSecret: JWT_SECRET
 });
 
 // ============================================================
@@ -947,9 +974,9 @@ app.get("/", (req, res) => {
   res.json({
     ok: true,
     app: "DDR Backend",
-    version: "3.0.0",
+    version: "3.1.0",
     message:
-      "Unified Account Backend is running"
+      "Unified Account Backend with Maya Control Center is running"
   });
 });
 
@@ -960,7 +987,9 @@ app.get(
       ok: true,
       service:
         "ddr-backend",
-      version: "3.0.0",
+      version: "3.1.0",
+      controlCenter:
+        true,
       time:
         new Date().toISOString()
     });
@@ -976,9 +1005,12 @@ app.get(
       appName: "Maya",
 
       backendVersion:
-        "3.0.0",
+        "3.1.0",
 
       telegramMiniApp:
+        true,
+
+      controlCenter:
         true,
 
       authentication: {
@@ -1060,10 +1092,6 @@ app.post(
           req.body.password || ""
         );
 
-      // ------------------------------------------------------
-      // VALIDATION
-      // ------------------------------------------------------
-
       if (!name) {
         return res.status(400).json({
           ok: false,
@@ -1108,10 +1136,6 @@ app.post(
         });
       }
 
-      // ------------------------------------------------------
-      // CHECK USERNAME
-      // ------------------------------------------------------
-
       const usernameResult =
         await pool.query(
           `
@@ -1133,10 +1157,6 @@ app.post(
             "Username is already used"
         });
       }
-
-      // ------------------------------------------------------
-      // CHECK EMAIL
-      // ------------------------------------------------------
 
       if (email) {
         const emailResult =
@@ -1162,10 +1182,6 @@ app.post(
         }
       }
 
-      // ------------------------------------------------------
-      // CHECK PHONE
-      // ------------------------------------------------------
-
       if (phone) {
         const phoneResult =
           await pool.query(
@@ -1189,18 +1205,10 @@ app.post(
         }
       }
 
-      // ------------------------------------------------------
-      // PASSWORD HASH
-      // ------------------------------------------------------
-
       const passwordHash =
         hashPassword(
           password
         );
-
-      // ------------------------------------------------------
-      // CREATE USER
-      // ------------------------------------------------------
 
       const result =
         await pool.query(
@@ -1244,20 +1252,12 @@ app.post(
       const user =
         result.rows[0];
 
-      // ------------------------------------------------------
-      // AUTH EVENT
-      // ------------------------------------------------------
-
       await logAuthEvent(
         req,
         user.id,
         "register",
         "password"
       );
-
-      // ------------------------------------------------------
-      // JWT
-      // ------------------------------------------------------
 
       const token =
         createJWT({
@@ -1411,10 +1411,6 @@ app.post(
         });
       }
 
-      // ------------------------------------------------------
-      // UPDATE LOGIN
-      // ------------------------------------------------------
-
       const updated =
         await pool.query(
           `
@@ -1503,10 +1499,6 @@ app.post(
           telegramUser.id
         );
 
-      // ------------------------------------------------------
-      // OPTIONAL JWT
-      // ------------------------------------------------------
-
       const bearer =
         getBearerToken(req);
 
@@ -1516,7 +1508,6 @@ app.post(
           : null;
 
       // ======================================================
-      // CASE 1
       // EXISTING LOGGED-IN ACCOUNT
       // LINK TELEGRAM
       // ======================================================
@@ -1640,7 +1631,6 @@ app.post(
       }
 
       // ======================================================
-      // CASE 2
       // TELEGRAM ACCOUNT EXISTS
       // ======================================================
 
@@ -1724,7 +1714,6 @@ app.post(
       }
 
       // ======================================================
-      // CASE 3
       // NEW TELEGRAM ACCOUNT
       // ======================================================
 
@@ -1826,9 +1815,6 @@ app.post(
 // ============================================================
 // SET CREDENTIALS
 // ============================================================
-// Existing Telegram/social account can later create
-// username + email/phone + password.
-// ============================================================
 
 app.post(
   "/api/auth/set-credentials",
@@ -1891,10 +1877,6 @@ app.post(
         });
       }
 
-      // ------------------------------------------------------
-      // USERNAME CONFLICT
-      // ------------------------------------------------------
-
       const usernameConflict =
         await pool.query(
           `
@@ -1921,10 +1903,6 @@ app.post(
             "Username is already used by another account"
         });
       }
-
-      // ------------------------------------------------------
-      // EMAIL CONFLICT
-      // ------------------------------------------------------
 
       if (email) {
         const result =
@@ -1954,10 +1932,6 @@ app.post(
           });
         }
       }
-
-      // ------------------------------------------------------
-      // PHONE CONFLICT
-      // ------------------------------------------------------
 
       if (phone) {
         const result =
@@ -2119,10 +2093,6 @@ app.patch(
           req.body.phone
         );
 
-      // ------------------------------------------------------
-      // USERNAME CONFLICT
-      // ------------------------------------------------------
-
       if (username) {
         if (
           !/^[a-z0-9_]{3,32}$/i.test(
@@ -2164,10 +2134,6 @@ app.patch(
         }
       }
 
-      // ------------------------------------------------------
-      // EMAIL CONFLICT
-      // ------------------------------------------------------
-
       if (email) {
         const conflict =
           await pool.query(
@@ -2196,10 +2162,6 @@ app.patch(
           });
         }
       }
-
-      // ------------------------------------------------------
-      // PHONE CONFLICT
-      // ------------------------------------------------------
 
       if (phone) {
         const conflict =
@@ -2516,6 +2478,12 @@ async function startServer() {
   try {
     await ensureDatabase();
 
+    // ========================================================
+    // MAYA ADMIN CONTROL CENTER DATABASE
+    // ========================================================
+
+    await ensureControlCenterDatabase(pool);
+
     console.log(
       "Database tables ready"
     );
@@ -2526,6 +2494,10 @@ async function startServer() {
       () => {
         console.log(
           `DDR backend running on port ${PORT}`
+        );
+
+        console.log(
+          "Maya Admin Control Center routes enabled"
         );
       }
     );
