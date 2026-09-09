@@ -49,7 +49,14 @@ const pool = new Pool({
 app.use(
   cors({
     origin: process.env.FRONTEND_ORIGIN || "*",
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    methods: [
+      "GET",
+      "POST",
+      "PUT",
+      "PATCH",
+      "DELETE",
+      "OPTIONS"
+    ],
     allowedHeaders: [
       "Content-Type",
       "Authorization",
@@ -59,30 +66,21 @@ app.use(
   })
 );
 
-app.use(express.json({ limit: "1mb" }));
+app.use(
+  express.json({
+    limit: "1mb"
+  })
+);
 
 // ============================================================
 // HELPERS
 // ============================================================
 
-function normalizeEmail(email) {
-  if (!email) return null;
-
-  return String(email)
-    .trim()
-    .toLowerCase();
-}
-
-function normalizePhone(phone) {
-  if (!phone) return null;
-
-  return String(phone)
-    .trim()
-    .replace(/[^\d+]/g, "");
-}
-
 function cleanText(value) {
-  if (value === undefined || value === null) {
+  if (
+    value === undefined ||
+    value === null
+  ) {
     return null;
   }
 
@@ -91,9 +89,49 @@ function cleanText(value) {
   return text || null;
 }
 
+function normalizeEmail(email) {
+  if (!email) {
+    return null;
+  }
+
+  return String(email)
+    .trim()
+    .toLowerCase();
+}
+
+function normalizePhone(phone) {
+  if (!phone) {
+    return null;
+  }
+
+  return String(phone)
+    .trim()
+    .replace(/[^\d+]/g, "");
+}
+
+function normalizeUsername(username) {
+  if (!username) {
+    return null;
+  }
+
+  let value = String(username)
+    .trim()
+    .toLowerCase();
+
+  value = value.replace(/^@/, "");
+
+  if (!value) {
+    return null;
+  }
+
+  return value;
+}
+
 function getClientIp(req) {
   return (
-    req.headers["x-forwarded-for"]?.split(",")[0]?.trim() ||
+    req.headers["x-forwarded-for"]
+      ?.split(",")[0]
+      ?.trim() ||
     req.socket?.remoteAddress ||
     null
   );
@@ -104,23 +142,29 @@ function getClientIp(req) {
 // ============================================================
 
 function hashPassword(password) {
-  const salt = crypto.randomBytes(16).toString("hex");
+  const salt =
+    crypto.randomBytes(16).toString("hex");
 
-  const hash = crypto.scryptSync(
-    password,
-    salt,
-    64
-  ).toString("hex");
+  const hash =
+    crypto.scryptSync(
+      password,
+      salt,
+      64
+    ).toString("hex");
 
   return `${salt}:${hash}`;
 }
 
-function verifyPassword(password, storedHash) {
+function verifyPassword(
+  password,
+  storedHash
+) {
   if (!storedHash) {
     return false;
   }
 
-  const parts = storedHash.split(":");
+  const parts =
+    storedHash.split(":");
 
   if (parts.length !== 2) {
     return false;
@@ -129,18 +173,38 @@ function verifyPassword(password, storedHash) {
   const salt = parts[0];
   const stored = parts[1];
 
-  const calculated = crypto
-    .scryptSync(password, salt, 64)
-    .toString("hex");
+  try {
+    const calculated =
+      crypto.scryptSync(
+        password,
+        salt,
+        64
+      ).toString("hex");
 
-  const a = Buffer.from(stored, "hex");
-  const b = Buffer.from(calculated, "hex");
+    const a =
+      Buffer.from(
+        stored,
+        "hex"
+      );
 
-  if (a.length !== b.length) {
+    const b =
+      Buffer.from(
+        calculated,
+        "hex"
+      );
+
+    if (a.length !== b.length) {
+      return false;
+    }
+
+    return crypto.timingSafeEqual(
+      a,
+      b
+    );
+
+  } catch {
     return false;
   }
-
-  return crypto.timingSafeEqual(a, b);
 }
 
 // ============================================================
@@ -155,9 +219,15 @@ function base64url(input) {
     .replace(/=+$/g, "");
 }
 
-function createJWT(payload, expiresInSeconds = 60 * 60 * 24 * 30) {
+function createJWT(
+  payload,
+  expiresInSeconds =
+    60 * 60 * 24 * 30
+) {
   if (!JWT_SECRET) {
-    throw new Error("JWT_SECRET is not configured");
+    throw new Error(
+      "JWT_SECRET is not configured"
+    );
   }
 
   const header = {
@@ -165,83 +235,125 @@ function createJWT(payload, expiresInSeconds = 60 * 60 * 24 * 30) {
     typ: "JWT"
   };
 
-  const now = Math.floor(Date.now() / 1000);
+  const now =
+    Math.floor(
+      Date.now() / 1000
+    );
 
   const body = {
     ...payload,
     iat: now,
-    exp: now + expiresInSeconds
+    exp:
+      now + expiresInSeconds
   };
 
-  const encodedHeader = base64url(
-    JSON.stringify(header)
-  );
+  const encodedHeader =
+    base64url(
+      JSON.stringify(header)
+    );
 
-  const encodedBody = base64url(
-    JSON.stringify(body)
-  );
+  const encodedBody =
+    base64url(
+      JSON.stringify(body)
+    );
 
   const unsigned =
     `${encodedHeader}.${encodedBody}`;
 
-  const signature = crypto
-    .createHmac("sha256", JWT_SECRET)
-    .update(unsigned)
-    .digest("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
-
-  return `${unsigned}.${signature}`;
-}
-
-function verifyJWT(token) {
-  try {
-    if (!JWT_SECRET || !token) {
-      return null;
-    }
-
-    const parts = token.split(".");
-
-    if (parts.length !== 3) {
-      return null;
-    }
-
-    const [header, payload, signature] = parts;
-
-    const unsigned =
-      `${header}.${payload}`;
-
-    const expected = crypto
-      .createHmac("sha256", JWT_SECRET)
+  const signature =
+    crypto
+      .createHmac(
+        "sha256",
+        JWT_SECRET
+      )
       .update(unsigned)
       .digest("base64")
       .replace(/\+/g, "-")
       .replace(/\//g, "_")
       .replace(/=+$/g, "");
 
-    const a = Buffer.from(signature);
-    const b = Buffer.from(expected);
+  return (
+    `${unsigned}.${signature}`
+  );
+}
+
+function verifyJWT(token) {
+  try {
+    if (
+      !JWT_SECRET ||
+      !token
+    ) {
+      return null;
+    }
+
+    const parts =
+      token.split(".");
+
+    if (parts.length !== 3) {
+      return null;
+    }
+
+    const [
+      header,
+      payload,
+      signature
+    ] = parts;
+
+    const unsigned =
+      `${header}.${payload}`;
+
+    const expected =
+      crypto
+        .createHmac(
+          "sha256",
+          JWT_SECRET
+        )
+        .update(unsigned)
+        .digest("base64")
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_")
+        .replace(/=+$/g, "");
+
+    const a =
+      Buffer.from(signature);
+
+    const b =
+      Buffer.from(expected);
 
     if (a.length !== b.length) {
       return null;
     }
 
-    if (!crypto.timingSafeEqual(a, b)) {
+    if (
+      !crypto.timingSafeEqual(
+        a,
+        b
+      )
+    ) {
       return null;
     }
 
-    const decoded = JSON.parse(
-      Buffer.from(payload, "base64url").toString("utf8")
-    );
+    const decoded =
+      JSON.parse(
+        Buffer.from(
+          payload,
+          "base64url"
+        ).toString("utf8")
+      );
 
     if (!decoded.exp) {
       return null;
     }
 
     if (
-      Math.floor(Date.now() / 1000) >= decoded.exp
+      Math.floor(
+        Date.now() / 1000
+      ) >= decoded.exp
     ) {
+      return null;
+    }
+
+    if (!decoded.userId) {
       return null;
     }
 
@@ -253,78 +365,109 @@ function verifyJWT(token) {
 }
 
 // ============================================================
-// AUTH MIDDLEWARE
+// BEARER TOKEN
 // ============================================================
 
 function getBearerToken(req) {
-  const header = req.headers.authorization || "";
+  const header =
+    req.headers.authorization || "";
 
-  if (!header.startsWith("Bearer ")) {
+  if (
+    !header.startsWith(
+      "Bearer "
+    )
+  ) {
     return null;
   }
 
-  return header.substring(7).trim();
+  return header
+    .substring(7)
+    .trim();
 }
 
-async function authenticateRequest(req, res, next) {
+// ============================================================
+// AUTH MIDDLEWARE
+// ============================================================
+
+async function authenticateRequest(
+  req,
+  res,
+  next
+) {
   try {
-    const token = getBearerToken(req);
+    const token =
+      getBearerToken(req);
 
     if (!token) {
       return res.status(401).json({
         ok: false,
-        error: "Authentication required"
+        error:
+          "Authentication required"
       });
     }
 
-    const decoded = verifyJWT(token);
+    const decoded =
+      verifyJWT(token);
 
-    if (!decoded || !decoded.userId) {
+    if (
+      !decoded ||
+      !decoded.userId
+    ) {
       return res.status(401).json({
         ok: false,
-        error: "Invalid or expired session"
+        error:
+          "Invalid or expired session"
       });
     }
 
-    const result = await pool.query(
-      `
-      SELECT
-        id,
-        telegram_id,
-        first_name,
-        last_name,
-        username,
-        language_code,
-        photo_url,
-        full_name,
-        email,
-        phone,
-        balance,
-        status,
-        last_login_source,
-        last_login_at,
-        created_at,
-        updated_at
-      FROM users
-      WHERE id = $1
-      LIMIT 1
-      `,
-      [decoded.userId]
-    );
+    const result =
+      await pool.query(
+        `
+        SELECT
+          id,
+          telegram_id,
+          first_name,
+          last_name,
+          username,
+          language_code,
+          photo_url,
+          full_name,
+          email,
+          phone,
+          password_hash,
+          balance,
+          status,
+          last_login_source,
+          last_login_at,
+          created_at,
+          updated_at
+        FROM users
+        WHERE id = $1
+        LIMIT 1
+        `,
+        [decoded.userId]
+      );
 
-    if (result.rows.length === 0) {
+    if (
+      result.rows.length === 0
+    ) {
       return res.status(401).json({
         ok: false,
-        error: "User account not found"
+        error:
+          "User account not found"
       });
     }
 
-    const user = result.rows[0];
+    const user =
+      result.rows[0];
 
-    if (user.status !== "active") {
+    if (
+      user.status !== "active"
+    ) {
       return res.status(403).json({
         ok: false,
-        error: "Account is not active"
+        error:
+          "Account is not active"
       });
     }
 
@@ -340,7 +483,8 @@ async function authenticateRequest(req, res, next) {
 
     return res.status(500).json({
       ok: false,
-      error: "Authentication failed"
+      error:
+        "Authentication failed"
     });
   }
 }
@@ -383,10 +527,12 @@ async function logAuthEvent(
         eventType,
         source || null,
         getClientIp(req),
-        req.headers["user-agent"] || null,
+        req.headers["user-agent"] ||
+          null,
         JSON.stringify(metadata)
       ]
     );
+
   } catch (error) {
     console.error(
       "Auth event logging error:",
@@ -402,82 +548,119 @@ async function logAuthEvent(
 async function ensureDatabase() {
 
   // ----------------------------------------------------------
-  // USERS TABLE
+  // USERS
   // ----------------------------------------------------------
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
       id BIGSERIAL PRIMARY KEY,
+
       telegram_id BIGINT UNIQUE,
+
       first_name TEXT,
       last_name TEXT,
+
       username TEXT,
+
       language_code TEXT,
       photo_url TEXT,
 
       full_name TEXT,
+
       email TEXT,
       phone TEXT,
+
       password_hash TEXT,
 
-      balance NUMERIC(12,2) NOT NULL DEFAULT 0,
+      balance NUMERIC(12,2)
+        NOT NULL DEFAULT 0,
 
-      status TEXT NOT NULL DEFAULT 'active',
+      status TEXT
+        NOT NULL DEFAULT 'active',
 
       last_login_source TEXT,
       last_login_at TIMESTAMPTZ,
 
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      created_at TIMESTAMPTZ
+        NOT NULL DEFAULT NOW(),
+
+      updated_at TIMESTAMPTZ
+        NOT NULL DEFAULT NOW()
     )
   `);
 
   // ----------------------------------------------------------
-  // OLD DATABASE MIGRATION
+  // OLD DATABASE COMPATIBILITY
   // ----------------------------------------------------------
 
   await pool.query(`
     ALTER TABLE users
-    ALTER COLUMN telegram_id DROP NOT NULL
+    ALTER COLUMN telegram_id
+    DROP NOT NULL
   `);
 
   // ----------------------------------------------------------
-  // ADD MISSING COLUMNS
+  // MISSING COLUMNS
   // ----------------------------------------------------------
 
   await pool.query(`
     ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS full_name TEXT
+    ADD COLUMN IF NOT EXISTS
+    username TEXT
   `);
 
   await pool.query(`
     ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS email TEXT
+    ADD COLUMN IF NOT EXISTS
+    full_name TEXT
   `);
 
   await pool.query(`
     ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS phone TEXT
+    ADD COLUMN IF NOT EXISTS
+    email TEXT
   `);
 
   await pool.query(`
     ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS password_hash TEXT
+    ADD COLUMN IF NOT EXISTS
+    phone TEXT
   `);
 
   await pool.query(`
     ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active'
+    ADD COLUMN IF NOT EXISTS
+    password_hash TEXT
   `);
 
   await pool.query(`
     ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS last_login_source TEXT
+    ADD COLUMN IF NOT EXISTS
+    status TEXT
+    NOT NULL DEFAULT 'active'
   `);
 
   await pool.query(`
     ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ
+    ADD COLUMN IF NOT EXISTS
+    last_login_source TEXT
+  `);
+
+  await pool.query(`
+    ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS
+    last_login_at TIMESTAMPTZ
+  `);
+
+  // ----------------------------------------------------------
+  // UNIQUE USERNAME
+  // ----------------------------------------------------------
+
+  await pool.query(`
+    CREATE UNIQUE INDEX IF NOT EXISTS
+    users_username_unique_idx
+    ON users (LOWER(username))
+    WHERE username IS NOT NULL
   `);
 
   // ----------------------------------------------------------
@@ -522,12 +705,13 @@ async function ensureDatabase() {
 
       metadata JSONB,
 
-      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      created_at TIMESTAMPTZ
+        NOT NULL DEFAULT NOW()
     )
   `);
 
   // ----------------------------------------------------------
-  // INDEXES
+  // AUTH EVENT INDEXES
   // ----------------------------------------------------------
 
   await pool.query(`
@@ -542,32 +726,36 @@ async function ensureDatabase() {
     ON auth_events(created_at)
   `);
 
-  console.log("Database migration completed");
+  console.log(
+    "Database migration completed"
+  );
 }
 
 // ============================================================
 // TELEGRAM INIT DATA VALIDATION
 // ============================================================
 
-function validateTelegramInitData(initData) {
-
+function validateTelegramInitData(
+  initData
+) {
   if (!initData) {
     return null;
   }
 
-  if (!process.env.TELEGRAM_BOT_TOKEN) {
-    console.error(
-      "TELEGRAM_BOT_TOKEN is missing"
-    );
-
+  if (
+    !process.env.TELEGRAM_BOT_TOKEN
+  ) {
     return null;
   }
 
   try {
+    const params =
+      new URLSearchParams(
+        initData
+      );
 
-    const params = new URLSearchParams(initData);
-
-    const hash = params.get("hash");
+    const hash =
+      params.get("hash");
 
     if (!hash) {
       return null;
@@ -575,62 +763,82 @@ function validateTelegramInitData(initData) {
 
     params.delete("hash");
 
-    const dataCheckString = [...params.entries()]
-      .sort(([a], [b]) =>
-        a.localeCompare(b)
-      )
-      .map(
-        ([key, value]) =>
-          `${key}=${value}`
-      )
-      .join("\n");
+    const dataCheckString =
+      [...params.entries()]
+        .sort(
+          ([a], [b]) =>
+            a.localeCompare(b)
+        )
+        .map(
+          ([key, value]) =>
+            `${key}=${value}`
+        )
+        .join("\n");
 
-    const secretKey = crypto
-      .createHmac(
-        "sha256",
-        "WebAppData"
-      )
-      .update(
-        process.env.TELEGRAM_BOT_TOKEN
-      )
-      .digest();
+    const secretKey =
+      crypto
+        .createHmac(
+          "sha256",
+          "WebAppData"
+        )
+        .update(
+          process.env.TELEGRAM_BOT_TOKEN
+        )
+        .digest();
 
-    const calculatedHash = crypto
-      .createHmac(
-        "sha256",
-        secretKey
-      )
-      .update(dataCheckString)
-      .digest("hex");
+    const calculatedHash =
+      crypto
+        .createHmac(
+          "sha256",
+          secretKey
+        )
+        .update(
+          dataCheckString
+        )
+        .digest("hex");
 
-    const a = Buffer.from(
-      calculatedHash,
-      "hex"
-    );
+    const a =
+      Buffer.from(
+        calculatedHash,
+        "hex"
+      );
 
-    const b = Buffer.from(
-      hash,
-      "hex"
-    );
+    const b =
+      Buffer.from(
+        hash,
+        "hex"
+      );
 
     if (
-      a.length !== b.length ||
-      !crypto.timingSafeEqual(a, b)
+      a.length !== b.length
     ) {
       return null;
     }
 
-    const authDate = Number(
-      params.get("auth_date")
-    );
+    if (
+      !crypto.timingSafeEqual(
+        a,
+        b
+      )
+    ) {
+      return null;
+    }
+
+    const authDate =
+      Number(
+        params.get(
+          "auth_date"
+        )
+      );
 
     if (!authDate) {
       return null;
     }
 
-    const now = Math.floor(
-      Date.now() / 1000
-    );
+    const now =
+      Math.floor(
+        Date.now() / 1000
+      );
 
     // 24 hour validity
     if (
@@ -639,7 +847,7 @@ function validateTelegramInitData(initData) {
       return null;
     }
 
-    // Reject future auth date
+    // Reject future timestamp
     if (
       authDate - now > 60
     ) {
@@ -673,7 +881,7 @@ function validateTelegramInitData(initData) {
 }
 
 // ============================================================
-// USER RESPONSE
+// PUBLIC USER
 // ============================================================
 
 function publicUser(user) {
@@ -683,19 +891,39 @@ function publicUser(user) {
 
   return {
     id: user.id,
-    telegram_id: user.telegram_id,
-    first_name: user.first_name,
-    last_name: user.last_name,
-    username: user.username,
-    language_code: user.language_code,
-    photo_url: user.photo_url,
 
-    full_name: user.full_name,
-    email: user.email,
-    phone: user.phone,
+    telegram_id:
+      user.telegram_id,
 
-    balance: user.balance,
-    status: user.status,
+    first_name:
+      user.first_name,
+
+    last_name:
+      user.last_name,
+
+    username:
+      user.username,
+
+    language_code:
+      user.language_code,
+
+    photo_url:
+      user.photo_url,
+
+    full_name:
+      user.full_name,
+
+    email:
+      user.email,
+
+    phone:
+      user.phone,
+
+    balance:
+      user.balance,
+
+    status:
+      user.status,
 
     last_login_source:
       user.last_login_source,
@@ -703,8 +931,11 @@ function publicUser(user) {
     last_login_at:
       user.last_login_at,
 
-    created_at: user.created_at,
-    updated_at: user.updated_at
+    created_at:
+      user.created_at,
+
+    updated_at:
+      user.updated_at
   };
 }
 
@@ -716,64 +947,85 @@ app.get("/", (req, res) => {
   res.json({
     ok: true,
     app: "DDR Backend",
-    version: "2.0.0",
-    message: "Backend is running"
+    version: "3.0.0",
+    message:
+      "Unified Account Backend is running"
   });
 });
 
-app.get("/api/health", (req, res) => {
-  res.json({
-    ok: true,
-    service: "ddr-backend",
-    version: "2.0.0",
-    time: new Date().toISOString()
-  });
-});
-
-app.get("/api/config", (req, res) => {
-  res.json({
-    ok: true,
-    appName: "Maya",
-    backendVersion: "2.0.0",
-    telegramMiniApp: true,
-    authentication: {
-      email: true,
-      phone: true,
-      password: true,
-      telegram: true,
-      google: false,
-      facebook: false
-    }
-  });
-});
-
-app.get("/api/db-test", async (req, res) => {
-  try {
-
-    const result =
-      await pool.query(
-        "SELECT NOW() AS time"
-      );
-
+app.get(
+  "/api/health",
+  (req, res) => {
     res.json({
       ok: true,
-      database: "connected",
-      time: result.rows[0].time
-    });
-
-  } catch (error) {
-
-    console.error(
-      "Database error:",
-      error.message
-    );
-
-    res.status(500).json({
-      ok: false,
-      database: "connection_failed"
+      service:
+        "ddr-backend",
+      version: "3.0.0",
+      time:
+        new Date().toISOString()
     });
   }
-});
+);
+
+app.get(
+  "/api/config",
+  (req, res) => {
+    res.json({
+      ok: true,
+
+      appName: "Maya",
+
+      backendVersion:
+        "3.0.0",
+
+      telegramMiniApp:
+        true,
+
+      authentication: {
+        username: true,
+        email: true,
+        phone: true,
+        password: true,
+        telegram: true,
+
+        google: false,
+        facebook: false
+      }
+    });
+  }
+);
+
+app.get(
+  "/api/db-test",
+  async (req, res) => {
+    try {
+      const result =
+        await pool.query(
+          "SELECT NOW() AS time"
+        );
+
+      res.json({
+        ok: true,
+        database:
+          "connected",
+        time:
+          result.rows[0].time
+      });
+
+    } catch (error) {
+      console.error(
+        "Database error:",
+        error.message
+      );
+
+      res.status(500).json({
+        ok: false,
+        database:
+          "connection_failed"
+      });
+    }
+  }
+);
 
 // ============================================================
 // REGISTER
@@ -782,36 +1034,69 @@ app.get("/api/db-test", async (req, res) => {
 app.post(
   "/api/auth/register",
   async (req, res) => {
-
     try {
-
       const name =
-        cleanText(req.body.name);
+        cleanText(
+          req.body.name
+        );
+
+      const username =
+        normalizeUsername(
+          req.body.username
+        );
 
       const email =
-        normalizeEmail(req.body.email);
+        normalizeEmail(
+          req.body.email
+        );
 
       const phone =
-        normalizePhone(req.body.phone);
+        normalizePhone(
+          req.body.phone
+        );
 
       const password =
-        String(req.body.password || "");
+        String(
+          req.body.password || ""
+        );
 
       // ------------------------------------------------------
-      // BASIC VALIDATION
+      // VALIDATION
       // ------------------------------------------------------
 
       if (!name) {
         return res.status(400).json({
           ok: false,
-          error: "Name is required"
+          error:
+            "Name is required"
+        });
+      }
+
+      if (!username) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "Username is required"
+        });
+      }
+
+      if (
+        !/^[a-z0-9_]{3,32}$/i.test(
+          username
+        )
+      ) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "Username must be 3-32 characters and contain only letters, numbers or underscore"
         });
       }
 
       if (!email && !phone) {
         return res.status(400).json({
           ok: false,
-          error: "Email or phone is required"
+          error:
+            "Email or phone is required"
         });
       }
 
@@ -824,35 +1109,68 @@ app.post(
       }
 
       // ------------------------------------------------------
-      // CHECK EXISTING ACCOUNT
+      // CHECK USERNAME
       // ------------------------------------------------------
 
-      let existing = null;
+      const usernameResult =
+        await pool.query(
+          `
+          SELECT id
+          FROM users
+          WHERE LOWER(username)
+                = LOWER($1)
+          LIMIT 1
+          `,
+          [username]
+        );
+
+      if (
+        usernameResult.rows.length
+      ) {
+        return res.status(409).json({
+          ok: false,
+          error:
+            "Username is already used"
+        });
+      }
+
+      // ------------------------------------------------------
+      // CHECK EMAIL
+      // ------------------------------------------------------
 
       if (email) {
-
-        const result =
+        const emailResult =
           await pool.query(
             `
-            SELECT *
+            SELECT id
             FROM users
-            WHERE LOWER(email) = LOWER($1)
+            WHERE LOWER(email)
+                  = LOWER($1)
             LIMIT 1
             `,
             [email]
           );
 
-        if (result.rows.length) {
-          existing = result.rows[0];
+        if (
+          emailResult.rows.length
+        ) {
+          return res.status(409).json({
+            ok: false,
+            error:
+              "Email is already used"
+          });
         }
       }
 
-      if (!existing && phone) {
+      // ------------------------------------------------------
+      // CHECK PHONE
+      // ------------------------------------------------------
 
-        const result =
+      if (phone) {
+        const phoneResult =
           await pool.query(
             `
-            SELECT *
+            SELECT id
             FROM users
             WHERE phone = $1
             LIMIT 1
@@ -860,17 +1178,15 @@ app.post(
             [phone]
           );
 
-        if (result.rows.length) {
-          existing = result.rows[0];
+        if (
+          phoneResult.rows.length
+        ) {
+          return res.status(409).json({
+            ok: false,
+            error:
+              "Phone is already used"
+          });
         }
-      }
-
-      if (existing) {
-        return res.status(409).json({
-          ok: false,
-          error:
-            "An account already exists with this email or phone"
-        });
       }
 
       // ------------------------------------------------------
@@ -878,7 +1194,9 @@ app.post(
       // ------------------------------------------------------
 
       const passwordHash =
-        hashPassword(password);
+        hashPassword(
+          password
+        );
 
       // ------------------------------------------------------
       // CREATE USER
@@ -890,6 +1208,7 @@ app.post(
           INSERT INTO users (
             first_name,
             full_name,
+            username,
             email,
             phone,
             password_hash,
@@ -904,6 +1223,7 @@ app.post(
             $3,
             $4,
             $5,
+            $6,
             'active',
             'password',
             NOW(),
@@ -914,6 +1234,7 @@ app.post(
           [
             name,
             name,
+            username,
             email,
             phone,
             passwordHash
@@ -946,11 +1267,11 @@ app.post(
       res.status(201).json({
         ok: true,
         token,
-        user: publicUser(user)
+        user:
+          publicUser(user)
       });
 
     } catch (error) {
-
       console.error(
         "Register error:",
         error
@@ -958,7 +1279,8 @@ app.post(
 
       res.status(500).json({
         ok: false,
-        error: "Registration failed"
+        error:
+          "Registration failed"
       });
     }
   }
@@ -971,51 +1293,77 @@ app.post(
 app.post(
   "/api/auth/login",
   async (req, res) => {
-
     try {
-
       const login =
-        cleanText(req.body.login);
+        cleanText(
+          req.body.login
+        );
 
       const password =
-        String(req.body.password || "");
+        String(
+          req.body.password || ""
+        );
 
-      if (!login || !password) {
+      if (
+        !login ||
+        !password
+      ) {
         return res.status(400).json({
           ok: false,
           error:
-            "Login and password are required"
+            "Username, email or phone and password are required"
         });
       }
 
+      const username =
+        normalizeUsername(
+          login
+        );
+
       const email =
-        normalizeEmail(login);
+        normalizeEmail(
+          login
+        );
 
       const phone =
-        normalizePhone(login);
+        normalizePhone(
+          login
+        );
 
-      let result =
+      const result =
         await pool.query(
           `
           SELECT *
           FROM users
           WHERE
             (
+              username IS NOT NULL
+              AND LOWER(username)
+                  = LOWER($1)
+            )
+            OR
+            (
               email IS NOT NULL
-              AND LOWER(email) = LOWER($1)
+              AND LOWER(email)
+                  = LOWER($2)
             )
             OR
             (
               phone IS NOT NULL
-              AND phone = $2
+              AND phone = $3
             )
           LIMIT 1
           `,
-          [email, phone]
+          [
+            username,
+            email,
+            phone
+          ]
         );
 
-      if (result.rows.length === 0) {
-
+      if (
+        result.rows.length === 0
+      ) {
         await logAuthEvent(
           req,
           null,
@@ -1033,7 +1381,9 @@ app.post(
       const user =
         result.rows[0];
 
-      if (user.status !== "active") {
+      if (
+        user.status !== "active"
+      ) {
         return res.status(403).json({
           ok: false,
           error:
@@ -1047,7 +1397,6 @@ app.post(
           user.password_hash
         )
       ) {
-
         await logAuthEvent(
           req,
           user.id,
@@ -1066,14 +1415,17 @@ app.post(
       // UPDATE LOGIN
       // ------------------------------------------------------
 
-      result =
+      const updated =
         await pool.query(
           `
           UPDATE users
           SET
-            last_login_source = 'password',
-            last_login_at = NOW(),
-            updated_at = NOW()
+            last_login_source =
+              'password',
+            last_login_at =
+              NOW(),
+            updated_at =
+              NOW()
           WHERE id = $1
           RETURNING *
           `,
@@ -1081,7 +1433,7 @@ app.post(
         );
 
       const updatedUser =
-        result.rows[0];
+        updated.rows[0];
 
       await logAuthEvent(
         req,
@@ -1092,17 +1444,20 @@ app.post(
 
       const token =
         createJWT({
-          userId: user.id
+          userId:
+            user.id
         });
 
       res.json({
         ok: true,
         token,
-        user: publicUser(updatedUser)
+        user:
+          publicUser(
+            updatedUser
+          )
       });
 
     } catch (error) {
-
       console.error(
         "Login error:",
         error
@@ -1110,7 +1465,8 @@ app.post(
 
       res.status(500).json({
         ok: false,
-        error: "Login failed"
+        error:
+          "Login failed"
       });
     }
   }
@@ -1123,9 +1479,7 @@ app.post(
 app.post(
   "/api/auth/telegram",
   async (req, res) => {
-
     try {
-
       const initData =
         req.headers[
           "x-telegram-init-data"
@@ -1137,7 +1491,6 @@ app.post(
         );
 
       if (!telegramUser) {
-
         return res.status(401).json({
           ok: false,
           error:
@@ -1146,10 +1499,12 @@ app.post(
       }
 
       const telegramId =
-        String(telegramUser.id);
+        String(
+          telegramUser.id
+        );
 
       // ------------------------------------------------------
-      // CHECK OPTIONAL EXISTING JWT
+      // OPTIONAL JWT
       // ------------------------------------------------------
 
       const bearer =
@@ -1162,11 +1517,14 @@ app.post(
 
       // ======================================================
       // CASE 1
-      // LOGGED-IN ACCOUNT -> LINK TELEGRAM
+      // EXISTING LOGGED-IN ACCOUNT
+      // LINK TELEGRAM
       // ======================================================
 
-      if (jwtUser && jwtUser.userId) {
-
+      if (
+        jwtUser &&
+        jwtUser.userId
+      ) {
         const existingTelegram =
           await pool.query(
             `
@@ -1182,9 +1540,11 @@ app.post(
           existingTelegram.rows.length &&
           String(
             existingTelegram.rows[0].id
-          ) !== String(jwtUser.userId)
+          ) !==
+            String(
+              jwtUser.userId
+            )
         ) {
-
           return res.status(409).json({
             ok: false,
             error:
@@ -1198,24 +1558,54 @@ app.post(
             UPDATE users
             SET
               telegram_id = $1,
-              first_name = COALESCE($2, first_name),
-              last_name = COALESCE($3, last_name),
-              username = COALESCE($4, username),
-              language_code = COALESCE($5, language_code),
-              photo_url = COALESCE($6, photo_url),
-              last_login_source = 'telegram',
-              last_login_at = NOW(),
-              updated_at = NOW()
-            WHERE id = $7
+
+              first_name =
+                COALESCE(
+                  $2,
+                  first_name
+                ),
+
+              last_name =
+                COALESCE(
+                  $3,
+                  last_name
+                ),
+
+              language_code =
+                COALESCE(
+                  $4,
+                  language_code
+                ),
+
+              photo_url =
+                COALESCE(
+                  $5,
+                  photo_url
+                ),
+
+              last_login_source =
+                'telegram',
+
+              last_login_at =
+                NOW(),
+
+              updated_at =
+                NOW()
+
+            WHERE id = $6
+
             RETURNING *
             `,
             [
               telegramId,
-              telegramUser.first_name || null,
-              telegramUser.last_name || null,
-              telegramUser.username || null,
-              telegramUser.language_code || null,
-              telegramUser.photo_url || null,
+              telegramUser.first_name ||
+                null,
+              telegramUser.last_name ||
+                null,
+              telegramUser.language_code ||
+                null,
+              telegramUser.photo_url ||
+                null,
               jwtUser.userId
             ]
           );
@@ -1229,26 +1619,29 @@ app.post(
           "telegram_link",
           "telegram",
           {
-            telegram_id: telegramId
+            telegram_id:
+              telegramId
           }
         );
 
         const token =
           createJWT({
-            userId: user.id
+            userId:
+              user.id
           });
 
         return res.json({
           ok: true,
           linked: true,
           token,
-          user: publicUser(user)
+          user:
+            publicUser(user)
         });
       }
 
       // ======================================================
       // CASE 2
-      // TELEGRAM ACCOUNT ALREADY EXISTS
+      // TELEGRAM ACCOUNT EXISTS
       // ======================================================
 
       const existing =
@@ -1262,8 +1655,9 @@ app.post(
           [telegramId]
         );
 
-      if (existing.rows.length) {
-
+      if (
+        existing.rows.length
+      ) {
         const result =
           await pool.query(
             `
@@ -1271,21 +1665,31 @@ app.post(
             SET
               first_name = $1,
               last_name = $2,
-              username = $3,
-              language_code = $4,
-              photo_url = $5,
-              last_login_source = 'telegram',
-              last_login_at = NOW(),
-              updated_at = NOW()
-            WHERE telegram_id = $6
+              language_code = $3,
+              photo_url = $4,
+
+              last_login_source =
+                'telegram',
+
+              last_login_at =
+                NOW(),
+
+              updated_at =
+                NOW()
+
+            WHERE telegram_id = $5
+
             RETURNING *
             `,
             [
-              telegramUser.first_name || null,
-              telegramUser.last_name || null,
-              telegramUser.username || null,
-              telegramUser.language_code || null,
-              telegramUser.photo_url || null,
+              telegramUser.first_name ||
+                null,
+              telegramUser.last_name ||
+                null,
+              telegramUser.language_code ||
+                null,
+              telegramUser.photo_url ||
+                null,
               telegramId
             ]
           );
@@ -1302,7 +1706,8 @@ app.post(
 
         const token =
           createJWT({
-            userId: user.id
+            userId:
+              user.id
           });
 
         console.log(
@@ -1313,7 +1718,8 @@ app.post(
           ok: true,
           linked: true,
           token,
-          user: publicUser(user)
+          user:
+            publicUser(user)
         });
       }
 
@@ -1353,11 +1759,24 @@ app.post(
           `,
           [
             telegramId,
-            telegramUser.first_name || null,
-            telegramUser.last_name || null,
-            telegramUser.username || null,
-            telegramUser.language_code || null,
-            telegramUser.photo_url || null
+
+            telegramUser.first_name ||
+              null,
+
+            telegramUser.last_name ||
+              null,
+
+            telegramUser.username
+              ? normalizeUsername(
+                  telegramUser.username
+                )
+              : null,
+
+            telegramUser.language_code ||
+              null,
+
+            telegramUser.photo_url ||
+              null
           ]
         );
 
@@ -1373,7 +1792,8 @@ app.post(
 
       const token =
         createJWT({
-          userId: user.id
+          userId:
+            user.id
         });
 
       console.log(
@@ -1384,11 +1804,11 @@ app.post(
         ok: true,
         linked: false,
         token,
-        user: publicUser(user)
+        user:
+          publicUser(user)
       });
 
     } catch (error) {
-
       console.error(
         "Telegram auth error:",
         error
@@ -1406,25 +1826,54 @@ app.post(
 // ============================================================
 // SET CREDENTIALS
 // ============================================================
-// Used when a Telegram/social account later wants to
-// create email/phone/password credentials.
+// Existing Telegram/social account can later create
+// username + email/phone + password.
 // ============================================================
 
 app.post(
   "/api/auth/set-credentials",
   authenticateRequest,
   async (req, res) => {
-
     try {
+      const username =
+        normalizeUsername(
+          req.body.username
+        );
 
       const email =
-        normalizeEmail(req.body.email);
+        normalizeEmail(
+          req.body.email
+        );
 
       const phone =
-        normalizePhone(req.body.phone);
+        normalizePhone(
+          req.body.phone
+        );
 
       const password =
-        String(req.body.password || "");
+        String(
+          req.body.password || ""
+        );
+
+      if (!username) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "Username is required"
+        });
+      }
+
+      if (
+        !/^[a-z0-9_]{3,32}$/i.test(
+          username
+        )
+      ) {
+        return res.status(400).json({
+          ok: false,
+          error:
+            "Invalid username"
+        });
+      }
 
       if (!email && !phone) {
         return res.status(400).json({
@@ -1443,18 +1892,49 @@ app.post(
       }
 
       // ------------------------------------------------------
-      // CHECK EMAIL CONFLICT
+      // USERNAME CONFLICT
+      // ------------------------------------------------------
+
+      const usernameConflict =
+        await pool.query(
+          `
+          SELECT id
+          FROM users
+          WHERE
+            LOWER(username)
+              = LOWER($1)
+            AND id <> $2
+          LIMIT 1
+          `,
+          [
+            username,
+            req.user.id
+          ]
+        );
+
+      if (
+        usernameConflict.rows.length
+      ) {
+        return res.status(409).json({
+          ok: false,
+          error:
+            "Username is already used by another account"
+        });
+      }
+
+      // ------------------------------------------------------
+      // EMAIL CONFLICT
       // ------------------------------------------------------
 
       if (email) {
-
         const result =
           await pool.query(
             `
             SELECT id
             FROM users
             WHERE
-              LOWER(email) = LOWER($1)
+              LOWER(email)
+                = LOWER($1)
               AND id <> $2
             LIMIT 1
             `,
@@ -1464,7 +1944,9 @@ app.post(
             ]
           );
 
-        if (result.rows.length) {
+        if (
+          result.rows.length
+        ) {
           return res.status(409).json({
             ok: false,
             error:
@@ -1474,11 +1956,10 @@ app.post(
       }
 
       // ------------------------------------------------------
-      // CHECK PHONE CONFLICT
+      // PHONE CONFLICT
       // ------------------------------------------------------
 
       if (phone) {
-
         const result =
           await pool.query(
             `
@@ -1495,7 +1976,9 @@ app.post(
             ]
           );
 
-        if (result.rows.length) {
+        if (
+          result.rows.length
+        ) {
           return res.status(409).json({
             ok: false,
             error:
@@ -1505,21 +1988,35 @@ app.post(
       }
 
       const passwordHash =
-        hashPassword(password);
+        hashPassword(
+          password
+        );
 
       const result =
         await pool.query(
           `
           UPDATE users
           SET
-            email = COALESCE($1, email),
-            phone = COALESCE($2, phone),
-            password_hash = $3,
+            username = $1,
+            email =
+              COALESCE(
+                $2,
+                email
+              ),
+            phone =
+              COALESCE(
+                $3,
+                phone
+              ),
+            password_hash = $4,
             updated_at = NOW()
-          WHERE id = $4
+
+          WHERE id = $5
+
           RETURNING *
           `,
           [
+            username,
             email,
             phone,
             passwordHash,
@@ -1539,17 +2036,18 @@ app.post(
 
       const token =
         createJWT({
-          userId: user.id
+          userId:
+            user.id
         });
 
       res.json({
         ok: true,
         token,
-        user: publicUser(user)
+        user:
+          publicUser(user)
       });
 
     } catch (error) {
-
       console.error(
         "Set credentials error:",
         error
@@ -1572,10 +2070,12 @@ app.get(
   "/api/me",
   authenticateRequest,
   async (req, res) => {
-
     res.json({
       ok: true,
-      user: publicUser(req.user)
+      user:
+        publicUser(
+          req.user
+        )
     });
   }
 );
@@ -1588,29 +2088,53 @@ app.patch(
   "/api/me",
   authenticateRequest,
   async (req, res) => {
-
     try {
-
       const fullName =
-        cleanText(req.body.full_name);
+        cleanText(
+          req.body.full_name
+        );
 
       const firstName =
-        cleanText(req.body.first_name);
+        cleanText(
+          req.body.first_name
+        );
 
       const lastName =
-        cleanText(req.body.last_name);
+        cleanText(
+          req.body.last_name
+        );
+
+      const username =
+        normalizeUsername(
+          req.body.username
+        );
 
       const email =
-        normalizeEmail(req.body.email);
+        normalizeEmail(
+          req.body.email
+        );
 
       const phone =
-        normalizePhone(req.body.phone);
+        normalizePhone(
+          req.body.phone
+        );
 
       // ------------------------------------------------------
-      // EMAIL CONFLICT
+      // USERNAME CONFLICT
       // ------------------------------------------------------
 
-      if (email) {
+      if (username) {
+        if (
+          !/^[a-z0-9_]{3,32}$/i.test(
+            username
+          )
+        ) {
+          return res.status(400).json({
+            ok: false,
+            error:
+              "Invalid username"
+          });
+        }
 
         const conflict =
           await pool.query(
@@ -1618,7 +2142,41 @@ app.patch(
             SELECT id
             FROM users
             WHERE
-              LOWER(email) = LOWER($1)
+              LOWER(username)
+                = LOWER($1)
+              AND id <> $2
+            LIMIT 1
+            `,
+            [
+              username,
+              req.user.id
+            ]
+          );
+
+        if (
+          conflict.rows.length
+        ) {
+          return res.status(409).json({
+            ok: false,
+            error:
+              "Username already belongs to another account"
+          });
+        }
+      }
+
+      // ------------------------------------------------------
+      // EMAIL CONFLICT
+      // ------------------------------------------------------
+
+      if (email) {
+        const conflict =
+          await pool.query(
+            `
+            SELECT id
+            FROM users
+            WHERE
+              LOWER(email)
+                = LOWER($1)
               AND id <> $2
             LIMIT 1
             `,
@@ -1628,7 +2186,9 @@ app.patch(
             ]
           );
 
-        if (conflict.rows.length) {
+        if (
+          conflict.rows.length
+        ) {
           return res.status(409).json({
             ok: false,
             error:
@@ -1642,7 +2202,6 @@ app.patch(
       // ------------------------------------------------------
 
       if (phone) {
-
         const conflict =
           await pool.query(
             `
@@ -1659,7 +2218,9 @@ app.patch(
             ]
           );
 
-        if (conflict.rows.length) {
+        if (
+          conflict.rows.length
+        ) {
           return res.status(409).json({
             ok: false,
             error:
@@ -1673,19 +2234,54 @@ app.patch(
           `
           UPDATE users
           SET
-            full_name = COALESCE($1, full_name),
-            first_name = COALESCE($2, first_name),
-            last_name = COALESCE($3, last_name),
-            email = COALESCE($4, email),
-            phone = COALESCE($5, phone),
-            updated_at = NOW()
-          WHERE id = $6
+            full_name =
+              COALESCE(
+                $1,
+                full_name
+              ),
+
+            first_name =
+              COALESCE(
+                $2,
+                first_name
+              ),
+
+            last_name =
+              COALESCE(
+                $3,
+                last_name
+              ),
+
+            username =
+              COALESCE(
+                $4,
+                username
+              ),
+
+            email =
+              COALESCE(
+                $5,
+                email
+              ),
+
+            phone =
+              COALESCE(
+                $6,
+                phone
+              ),
+
+            updated_at =
+              NOW()
+
+          WHERE id = $7
+
           RETURNING *
           `,
           [
             fullName,
             firstName,
             lastName,
+            username,
             email,
             phone,
             req.user.id
@@ -1704,11 +2300,11 @@ app.patch(
 
       res.json({
         ok: true,
-        user: publicUser(user)
+        user:
+          publicUser(user)
       });
 
     } catch (error) {
-
       console.error(
         "Profile update error:",
         error
@@ -1727,10 +2323,15 @@ app.patch(
 // ADMIN AUTHENTICATION
 // ============================================================
 
-function requireAdmin(req, res, next) {
-
+function requireAdmin(
+  req,
+  res,
+  next
+) {
   const key =
-    req.headers["x-admin-key"];
+    req.headers[
+      "x-admin-key"
+    ];
 
   if (
     !ADMIN_KEY ||
@@ -1739,7 +2340,8 @@ function requireAdmin(req, res, next) {
   ) {
     return res.status(403).json({
       ok: false,
-      error: "Admin access denied"
+      error:
+        "Admin access denied"
     });
   }
 
@@ -1754,9 +2356,7 @@ app.get(
   "/api/admin/users",
   requireAdmin,
   async (req, res) => {
-
     try {
-
       const result =
         await pool.query(
           `
@@ -1783,12 +2383,13 @@ app.get(
 
       res.json({
         ok: true,
-        count: result.rows.length,
-        users: result.rows
+        count:
+          result.rows.length,
+        users:
+          result.rows
       });
 
     } catch (error) {
-
       console.error(
         "Admin users error:",
         error
@@ -1811,9 +2412,7 @@ app.get(
   "/api/admin/auth-events",
   requireAdmin,
   async (req, res) => {
-
     try {
-
       const result =
         await pool.query(
           `
@@ -1834,12 +2433,13 @@ app.get(
 
       res.json({
         ok: true,
-        count: result.rows.length,
-        events: result.rows
+        count:
+          result.rows.length,
+        events:
+          result.rows
       });
 
     } catch (error) {
-
       console.error(
         "Admin auth events error:",
         error
@@ -1855,14 +2455,13 @@ app.get(
 );
 
 // ============================================================
-// PLACEHOLDER - TELEGRAM LINK
+// PLACEHOLDER TELEGRAM LINK
 // ============================================================
 
 app.post(
   "/api/auth/telegram-link",
   authenticateRequest,
   async (req, res) => {
-
     res.status(400).json({
       ok: false,
       error:
@@ -1877,10 +2476,10 @@ app.post(
 
 app.use(
   (req, res) => {
-
     res.status(404).json({
       ok: false,
-      error: "Route not found"
+      error:
+        "Route not found"
     });
   }
 );
@@ -1890,8 +2489,12 @@ app.use(
 // ============================================================
 
 app.use(
-  (err, req, res, next) => {
-
+  (
+    err,
+    req,
+    res,
+    next
+  ) => {
     console.error(
       "Unhandled error:",
       err
@@ -1910,9 +2513,7 @@ app.use(
 // ============================================================
 
 async function startServer() {
-
   try {
-
     await ensureDatabase();
 
     console.log(
@@ -1923,7 +2524,6 @@ async function startServer() {
       PORT,
       "0.0.0.0",
       () => {
-
         console.log(
           `DDR backend running on port ${PORT}`
         );
@@ -1931,7 +2531,6 @@ async function startServer() {
     );
 
   } catch (error) {
-
     console.error(
       "Failed to start server:",
       error
