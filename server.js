@@ -2614,6 +2614,24 @@ async function startServer() {
 
     await ensureControlCenterDatabase(pool);
 
+    // ========================================================
+    // MAYA CONTROL CENTER SCHEMA COMPATIBILITY MIGRATION
+    // ========================================================
+    // The existing Render database may have been created from an
+    // older schema. CREATE TABLE IF NOT EXISTS does NOT add new
+    // columns to an existing table, so explicitly add columns
+    // required by the current Control Center.
+    // ========================================================
+    await pool.query(`
+      ALTER TABLE staff_users
+        ADD COLUMN IF NOT EXISTS display_name TEXT,
+        ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ
+    `);
+
+    console.log(
+      "Maya Control Center schema compatibility migration completed"
+    );
+
     console.log(
       "Database tables ready"
     );
