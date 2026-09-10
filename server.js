@@ -230,6 +230,151 @@ app.post("/api/admin/staff/bootstrap", async (req, res) => {
 });
 
 // ============================================================
+// MAYA ADMIN LOGIN COMPATIBILITY ROUTE
+// ============================================================
+// Direct fallback for the first staff login.
+// This mirrors the Control Center module login endpoint.
+// ============================================================
+app.post("/api/admin/staff/login", async (req, res) => {
+  try {
+    const username = String(req.body?.username || "")
+      .trim()
+      .toLowerCase();
+    const password = String(req.body?.password || "");
+
+    const r = await pool.query(
+      `SELECT s.*, r.name AS role_name
+       FROM staff_users s
+       JOIN roles r ON r.id=s.role_id
+       WHERE LOWER(s.username)=LOWER($1)
+       LIMIT 1`,
+      [username]
+    );
+
+    const staff = r.rows[0];
+
+    if (
+      !staff ||
+      staff.status !== "active" ||
+      !verifyPassword(password, staff.password_hash)
+    ) {
+      return res.status(401).json({
+        ok: false,
+        error: "Invalid staff credentials"
+      });
+    }
+
+    await pool.query(
+      `UPDATE staff_users
+       SET last_login_at=NOW(), updated_at=NOW()
+       WHERE id=$1`,
+      [staff.id]
+    );
+
+    const token = signStaffToken(
+      {
+        staffId: staff.id,
+        role: staff.role_name
+      },
+      JWT_SECRET
+    );
+
+    console.log(
+      `Maya staff login success: ${staff.username}`
+    );
+
+    return res.json({
+      ok: true,
+      token,
+      staff: {
+        id: staff.id,
+        username: staff.username,
+        display_name: staff.display_name,
+        role: staff.role_name
+      }
+    });
+  } catch (error) {
+    console.error(
+      "Maya staff login compatibility error:",
+      error
+    );
+
+    return res.status(500).json({
+      ok: false,
+      error: "Staff login failed"
+    });
+  }
+});
+
+// ============================================================
+// MAYA ADMIN OVERVIEW COMPATIBILITY ROUTE
+// ============================================================
+app.get("/api/admin/control/overview", async (req, res) => {
+  try {
+    const token = String(
+      req.headers.authorization || ""
+    ).replace(/^Bearer\s+/i, "").trim();
+
+    const session = verifyStaffToken(
+      token,
+      JWT_SECRET
+    );
+
+    if (!session) {
+      return res.status(401).json({
+        ok: false,
+        error: "Staff authentication required"
+      });
+    }
+
+    const staffResult = await pool.query(
+      `SELECT s.id,s.username,s.display_name,s.status,r.name AS role_name
+       FROM staff_users s
+       JOIN roles r ON r.id=s.role_id
+       WHERE s.id=$1
+       LIMIT 1`,
+      [session.staffId]
+    );
+
+    if (
+      !staffResult.rows[0] ||
+      staffResult.rows[0].status !== "active"
+    ) {
+      return res.status(403).json({
+        ok: false,
+        error: "Staff account is inactive"
+      });
+    }
+
+    const [users, staff, ads, cms] = await Promise.all([
+      pool.query(`SELECT COUNT(*)::int AS n FROM users`),
+      pool.query(`SELECT COUNT(*)::int AS n FROM staff_users WHERE status='active'`),
+      pool.query(`SELECT COUNT(*)::int AS n FROM ad_creatives WHERE enabled=true`),
+      pool.query(`SELECT COUNT(*)::int AS n FROM cms_components WHERE enabled=true`)
+    ]);
+
+    return res.json({
+      ok: true,
+      users: users.rows[0].n,
+      staff: staff.rows[0].n,
+      active_ads: ads.rows[0].n,
+      cms_items: cms.rows[0].n
+    });
+  } catch (error) {
+    console.error(
+      "Maya overview compatibility error:",
+      error
+    );
+
+    return res.status(500).json({
+      ok: false,
+      error: "Could not load admin overview"
+    });
+  }
+});
+
+
+// ============================================================
 // HELPERS
 // ============================================================
 
