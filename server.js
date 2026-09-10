@@ -56,20 +56,6 @@ const pool = new Pool({
 });
 
 // ============================================================
-// REGISTER ADMIN CONTROL CENTER
-// ============================================================
-// IMPORTANT:
-// This must be registered before the 404 middleware.
-// ============================================================
-
-registerAdminControlCenter({
-  app,
-  pool,
-  adminKey: ADMIN_KEY,
-  jwtSecret: JWT_SECRET
-});
-
-// ============================================================
 // MIDDLEWARE
 // ============================================================
 
@@ -123,6 +109,23 @@ app.use(
     limit: "1mb"
   })
 );
+
+// ============================================================
+// REGISTER ADMIN CONTROL CENTER
+// ============================================================
+// IMPORTANT:
+// Register this AFTER CORS and JSON body parsing so that:
+// 1) browser CORS/preflight is handled correctly;
+// 2) admin POST requests have req.body available;
+// 3) routes are still registered before the 404 middleware.
+// ============================================================
+
+registerAdminControlCenter({
+  app,
+  pool,
+  adminKey: ADMIN_KEY,
+  jwtSecret: JWT_SECRET
+});
 
 // ============================================================
 // HELPERS
