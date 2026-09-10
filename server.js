@@ -2437,7 +2437,7 @@ app.get(
 
       res.status(500).json({
         ok: false,
-        error:
+       error:
           "Could not load authentication events"
       });
     }
