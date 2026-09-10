@@ -230,6 +230,95 @@ app.post("/api/admin/staff/bootstrap", async (req, res) => {
 });
 
 // ============================================================
+// MAYA STAFF TOKEN HELPERS
+// ============================================================
+// The Control Center module keeps its own token helpers private.
+// These helpers are used by the direct compatibility routes below.
+// ============================================================
+function staffBase64Url(value) {
+  return Buffer.from(value)
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+}
+
+function signStaffToken(payload, secret, ttl = 60 * 60 * 12) {
+  if (!secret) {
+    throw new Error("JWT_SECRET is not configured");
+  }
+
+  const header = staffBase64Url(
+    JSON.stringify({ alg: "HS256", typ: "JWT" })
+  );
+
+  const now = Math.floor(Date.now() / 1000);
+
+  const body = staffBase64Url(
+    JSON.stringify({
+      ...payload,
+      iat: now,
+      exp: now + ttl
+    })
+  );
+
+  const unsigned = `${header}.${body}`;
+
+  const signature = crypto
+    .createHmac("sha256", secret)
+    .update(unsigned)
+    .digest("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/g, "");
+
+  return `${unsigned}.${signature}`;
+}
+
+function verifyStaffToken(token, secret) {
+  try {
+    if (!token || !secret) return null;
+
+    const parts = String(token).split(".");
+    if (parts.length !== 3) return null;
+
+    const [header, payload, signature] = parts;
+    const unsigned = `${header}.${payload}`;
+
+    const expected = crypto
+      .createHmac("sha256", secret)
+      .update(unsigned)
+      .digest("base64")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/g, "");
+
+    const a = Buffer.from(signature);
+    const b = Buffer.from(expected);
+
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      return null;
+    }
+
+    const decoded = JSON.parse(
+      Buffer.from(payload, "base64url").toString("utf8")
+    );
+
+    if (
+      !decoded.exp ||
+      decoded.exp <= Math.floor(Date.now() / 1000) ||
+      !decoded.staffId
+    ) {
+      return null;
+    }
+
+    return decoded;
+  } catch {
+    return null;
+  }
+}
+
+// ============================================================
 // MAYA ADMIN LOGIN COMPATIBILITY ROUTE
 // ============================================================
 // Direct fallback for the first staff login.
@@ -2770,7 +2859,9 @@ async function startServer() {
     await pool.query(`
       ALTER TABLE staff_users
         ADD COLUMN IF NOT EXISTS display_name TEXT,
-        ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ
+        ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     `);
 
     console.log(
