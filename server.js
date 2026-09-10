@@ -73,9 +73,33 @@ registerAdminControlCenter({
 // MIDDLEWARE
 // ============================================================
 
+// ============================================================
+// ALLOWED FRONTEND ORIGINS
+// ============================================================
+// Ad2Reward frontend + Maya Admin Control Center
+// ============================================================
+
+const allowedOrigins = [
+  "https://ad2reward.netlify.app",
+  "https://adcpm.netlify.app"
+];
+
 app.use(
   cors({
-    origin: process.env.FRONTEND_ORIGIN || "*",
+    origin: function (origin, callback) {
+      if (!origin) {
+        return callback(null, true);
+      }
+
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(
+        new Error("CORS origin not allowed")
+      );
+    },
+
     methods: [
       "GET",
       "POST",
@@ -84,6 +108,7 @@ app.use(
       "DELETE",
       "OPTIONS"
     ],
+
     allowedHeaders: [
       "Content-Type",
       "Authorization",
