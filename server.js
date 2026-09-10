@@ -128,6 +128,108 @@ registerAdminControlCenter({
 });
 
 // ============================================================
+// MAYA ADMIN BOOTSTRAP COMPATIBILITY ROUTE
+// ============================================================
+// This route is intentionally kept as a direct compatibility
+// handler so the first Admin can be created even if the Control
+// Center module route is not mounted by an older deployment.
+// It uses the same ADMIN_KEY and database tables as the module.
+// ============================================================
+app.post("/api/admin/staff/bootstrap", async (req, res) => {
+  try {
+    const key = req.headers["x-admin-key"];
+
+    if (!ADMIN_KEY || !key || key !== ADMIN_KEY) {
+      return res.status(403).json({
+        ok: false,
+        error: "Bootstrap admin access denied"
+      });
+    }
+
+    const username = String(req.body?.username || "")
+      .trim()
+      .toLowerCase();
+    const password = String(req.body?.password || "");
+    const displayName = String(
+      req.body?.display_name || username
+    ).trim();
+    const roleName = String(
+      req.body?.role || "Admin"
+    ).trim();
+
+    if (!/^[a-z0-9_.-]{3,32}$/.test(username)) {
+      return res.status(400).json({
+        ok: false,
+        error: "Invalid staff username"
+      });
+    }
+
+    if (password.length < 10) {
+      return res.status(400).json({
+        ok: false,
+        error: "Staff password must be at least 10 characters"
+      });
+    }
+
+    const role = await pool.query(
+      `SELECT id,name FROM roles WHERE name=$1 LIMIT 1`,
+      [roleName]
+    );
+
+    if (!role.rows[0]) {
+      return res.status(400).json({
+        ok: false,
+        error: "Role not found"
+      });
+    }
+
+    const existing = await pool.query(
+      `SELECT id FROM staff_users WHERE LOWER(username)=LOWER($1) LIMIT 1`,
+      [username]
+    );
+
+    if (existing.rows[0]) {
+      return res.status(409).json({
+        ok: false,
+        error: "Staff username already exists"
+      });
+    }
+
+    const r = await pool.query(
+      `INSERT INTO staff_users
+       (username,display_name,password_hash,role_id)
+       VALUES($1,$2,$3,$4)
+       RETURNING id,username,display_name,status`,
+      [
+        username,
+        displayName,
+        hashPassword(password),
+        role.rows[0].id
+      ]
+    );
+
+    console.log(
+      `Maya bootstrap admin created: ${username}`
+    );
+
+    return res.json({
+      ok: true,
+      staff: r.rows[0]
+    });
+  } catch (error) {
+    console.error(
+      "Maya bootstrap compatibility error:",
+      error
+    );
+
+    return res.status(500).json({
+      ok: false,
+      error: "Could not create staff account"
+    });
+  }
+});
+
+// ============================================================
 // HELPERS
 // ============================================================
 
@@ -2437,7 +2539,7 @@ app.get(
 
       res.status(500).json({
         ok: false,
-       error:
+        error:
           "Could not load authentication events"
       });
     }
