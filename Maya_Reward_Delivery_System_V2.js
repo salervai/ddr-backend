@@ -1,2920 +1,391 @@
-require("dotenv").config();
+const crypto = require('crypto');
 
-const express = require("express");
-const cors = require("cors");
-const crypto = require("crypto");
-const { Pool } = require("pg");
-
-// ============================================================
-// ADMIN CONTROL CENTER MODULE
-// ============================================================
-
-const {
-  ensureControlCenterDatabase,
-  registerAdminControlCenter
-} = require("./admin_control_center");
-
-const {
-  registerMayaRewardSystem
-} = require("./Maya_Reward_Delivery_System_V2");
-
-// ============================================================
-// APP
-// ============================================================
-
-const app = express();
-const PORT = process.env.PORT || 10000;
-
-// ============================================================
-// CONFIG
-// ============================================================
-
-const JWT_SECRET = process.env.JWT_SECRET;
-const ADMIN_KEY = process.env.ADMIN_KEY;
-
-if (!process.env.DATABASE_URL) {
-  console.error("DATABASE_URL is missing");
+function randomToken(bytes = 24) {
+  return crypto.randomBytes(bytes).toString('hex');
 }
 
-if (!process.env.TELEGRAM_BOT_TOKEN) {
-  console.error("TELEGRAM_BOT_TOKEN is missing");
-}
+function registerMayaRewardSystem({ app, pool, botToken, authenticateRequest }) {
+  if (!app || !pool) throw new Error('Maya Reward System requires app and pool');
 
-if (!JWT_SECRET) {
-  console.error("JWT_SECRET is missing");
-}
-
-if (!ADMIN_KEY) {
-  console.error("ADMIN_KEY is missing");
-}
-
-// ============================================================
-// DATABASE
-// ============================================================
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: {
-    rejectUnauthorized: false
-  }
-});
-
-// ============================================================
-// MIDDLEWARE
-// ============================================================
-
-// ============================================================
-// ALLOWED FRONTEND ORIGINS
-// ============================================================
-// Ad2Reward frontend + Maya Admin Control Center
-// ============================================================
-
-const allowedOrigins = [
-  "https://ad2reward.netlify.app",
-  "https://adcpm.netlify.app"
-];
-
-app.use(
-  cors({
-    origin: function (origin, callback) {
-      if (!origin) {
-        return callback(null, true);
-      }
-
-      if (allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-
-      return callback(
-        new Error("CORS origin not allowed")
-      );
-    },
-
-    methods: [
-      "GET",
-      "POST",
-      "PUT",
-      "PATCH",
-      "DELETE",
-      "OPTIONS"
-    ],
-
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-      "X-Telegram-Init-Data",
-      "X-Admin-Key"
-    ]
-  })
-);
-
-app.use(
-  express.json({
-    limit: "1mb"
-  })
-);
-
-// ============================================================
-// REGISTER ADMIN CONTROL CENTER
-// ============================================================
-// IMPORTANT:
-// Register this AFTER CORS and JSON body parsing so that:
-// 1) browser CORS/preflight is handled correctly;
-// 2) admin POST requests have req.body available;
-// 3) routes are still registered before the 404 middleware.
-// ============================================================
-
-registerAdminControlCenter({
-  app,
-  pool,
-  adminKey: ADMIN_KEY,
-  jwtSecret: JWT_SECRET
-});
-
-// Maya Reward / Video Delivery System
-// Routes are registered after CORS + JSON middleware and before 404.
-const mayaRewardSystem = registerMayaRewardSystem({
-  app,
-  pool,
-  botToken: process.env.TELEGRAM_BOT_TOKEN,
-  authenticateRequest
-});
-
-// ============================================================
-// MAYA ADMIN BOOTSTRAP COMPATIBILITY ROUTE
-// ============================================================
-// This route is intentionally kept as a direct compatibility
-// handler so the first Admin can be created even if the Control
-// Center module route is not mounted by an older deployment.
-// It uses the same ADMIN_KEY and database tables as the module.
-// ============================================================
-app.post("/api/admin/staff/bootstrap", async (req, res) => {
-  try {
-    const key = req.headers["x-admin-key"];
-
-    if (!ADMIN_KEY || !key || key !== ADMIN_KEY) {
-      return res.status(403).json({
-        ok: false,
-        error: "Bootstrap admin access denied"
-      });
-    }
-
-    const username = String(req.body?.username || "")
-      .trim()
-      .toLowerCase();
-    const password = String(req.body?.password || "");
-    const displayName = String(
-      req.body?.display_name || username
-    ).trim();
-    const roleName = String(
-      req.body?.role || "Admin"
-    ).trim();
-
-    if (!/^[a-z0-9_.-]{3,32}$/.test(username)) {
-      return res.status(400).json({
-        ok: false,
-        error: "Invalid staff username"
-      });
-    }
-
-    if (password.length < 10) {
-      return res.status(400).json({
-        ok: false,
-        error: "Staff password must be at least 10 characters"
-      });
-    }
-
-    const role = await pool.query(
-      `SELECT id,name FROM roles WHERE name=$1 LIMIT 1`,
-      [roleName]
-    );
-
-    if (!role.rows[0]) {
-      return res.status(400).json({
-        ok: false,
-        error: "Role not found"
-      });
-    }
-
-    const existing = await pool.query(
-      `SELECT id FROM staff_users WHERE LOWER(username)=LOWER($1) LIMIT 1`,
-      [username]
-    );
-
-    if (existing.rows[0]) {
-      return res.status(409).json({
-        ok: false,
-        error: "Staff username already exists"
-      });
-    }
-
-    const r = await pool.query(
-      `INSERT INTO staff_users
-       (username,display_name,password_hash,role_id)
-       VALUES($1,$2,$3,$4)
-       RETURNING id,username,display_name,status`,
-      [
-        username,
-        displayName,
-        hashPassword(password),
-        role.rows[0].id
-      ]
-    );
-
-    console.log(
-      `Maya bootstrap admin created: ${username}`
-    );
-
-    return res.json({
-      ok: true,
-      staff: r.rows[0]
-    });
-  } catch (error) {
-    console.error(
-      "Maya bootstrap compatibility error:",
-      error
-    );
-
-    return res.status(500).json({
-      ok: false,
-      error: "Could not create staff account"
-    });
-  }
-});
-
-// ============================================================
-// STAFF JWT HELPERS
-// ============================================================
-// Separate staff token helpers for the Maya Admin Control Center.
-// These do not use the user JWT verifier because staff sessions
-// identify staffId rather than userId.
-// ============================================================
-function signStaffToken(payload, secret) {
-  if (!secret) {
-    throw new Error("JWT_SECRET is not configured");
-  }
-
-  const header = base64url(JSON.stringify({
-    alg: "HS256",
-    typ: "JWT"
-  }));
-
-  const now = Math.floor(Date.now() / 1000);
-
-  const body = base64url(JSON.stringify({
-    ...payload,
-    staff: true,
-    iat: now,
-    exp: now + 60 * 60 * 24
-  }));
-
-  const unsigned = `${header}.${body}`;
-
-  const signature = crypto
-    .createHmac("sha256", secret)
-    .update(unsigned)
-    .digest("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
-
-  return `${unsigned}.${signature}`;
-}
-
-function verifyStaffToken(token, secret) {
-  try {
-    if (!token || !secret) {
-      return null;
-    }
-
-    const parts = token.split(".");
-
-    if (parts.length !== 3) {
-      return null;
-    }
-
-    const [header, payload, signature] = parts;
-    const unsigned = `${header}.${payload}`;
-
-    const expected = crypto
-      .createHmac("sha256", secret)
-      .update(unsigned)
-      .digest("base64")
-      .replace(/\+/g, "-")
-      .replace(/\//g, "_")
-      .replace(/=+$/g, "");
-
-    const a = Buffer.from(signature);
-    const b = Buffer.from(expected);
-
-    if (a.length !== b.length) {
-      return null;
-    }
-
-    if (!crypto.timingSafeEqual(a, b)) {
-      return null;
-    }
-
-    const decoded = JSON.parse(
-      Buffer.from(payload, "base64url").toString("utf8")
-    );
-
-    if (decoded.staff !== true || !decoded.staffId || !decoded.exp) {
-      return null;
-    }
-
-    if (Math.floor(Date.now() / 1000) >= decoded.exp) {
-      return null;
-    }
-
-    return decoded;
-  } catch {
-    return null;
-  }
-}
-
-// ============================================================
-// MAYA ADMIN LOGIN COMPATIBILITY ROUTE
-// ============================================================
-// Direct fallback for the first staff login.
-// This mirrors the Control Center module login endpoint.
-// ============================================================
-app.post("/api/admin/staff/login", async (req, res) => {
-  try {
-    const username = String(req.body?.username || "")
-      .trim()
-      .toLowerCase();
-    const password = String(req.body?.password || "");
-
-    const r = await pool.query(
-      `SELECT s.*, r.name AS role_name
-       FROM staff_users s
-       JOIN roles r ON r.id=s.role_id
-       WHERE LOWER(s.username)=LOWER($1)
-       LIMIT 1`,
-      [username]
-    );
-
-    const staff = r.rows[0];
-
-    if (
-      !staff ||
-      staff.status !== "active" ||
-      !verifyPassword(password, staff.password_hash)
-    ) {
-      return res.status(401).json({
-        ok: false,
-        error: "Invalid staff credentials"
-      });
-    }
-
-    await pool.query(
-      `UPDATE staff_users
-       SET last_login_at=NOW(), updated_at=NOW()
-       WHERE id=$1`,
-      [staff.id]
-    );
-
-    const token = signStaffToken(
-      {
-        staffId: staff.id,
-        role: staff.role_name
-      },
-      JWT_SECRET
-    );
-
-    console.log(
-      `Maya staff login success: ${staff.username}`
-    );
-
-    return res.json({
-      ok: true,
-      token,
-      staff: {
-        id: staff.id,
-        username: staff.username,
-        display_name: staff.display_name,
-        role: staff.role_name
-      }
-    });
-  } catch (error) {
-    console.error(
-      "Maya staff login compatibility error:",
-      error
-    );
-
-    return res.status(500).json({
-      ok: false,
-      error: "Staff login failed"
-    });
-  }
-});
-
-// ============================================================
-// MAYA ADMIN OVERVIEW COMPATIBILITY ROUTE
-// ============================================================
-app.get("/api/admin/control/overview", async (req, res) => {
-  try {
-    const token = String(
-      req.headers.authorization || ""
-    ).replace(/^Bearer\s+/i, "").trim();
-
-    const session = verifyStaffToken(
-      token,
-      JWT_SECRET
-    );
-
-    if (!session) {
-      return res.status(401).json({
-        ok: false,
-        error: "Staff authentication required"
-      });
-    }
-
-    const staffResult = await pool.query(
-      `SELECT s.id,s.username,s.display_name,s.status,r.name AS role_name
-       FROM staff_users s
-       JOIN roles r ON r.id=s.role_id
-       WHERE s.id=$1
-       LIMIT 1`,
-      [session.staffId]
-    );
-
-    if (
-      !staffResult.rows[0] ||
-      staffResult.rows[0].status !== "active"
-    ) {
-      return res.status(403).json({
-        ok: false,
-        error: "Staff account is inactive"
-      });
-    }
-
-    const [users, staff, ads, cms] = await Promise.all([
-      pool.query(`SELECT COUNT(*)::int AS n FROM users`),
-      pool.query(`SELECT COUNT(*)::int AS n FROM staff_users WHERE status='active'`),
-      pool.query(`SELECT COUNT(*)::int AS n FROM ad_creatives WHERE enabled=true`),
-      pool.query(`SELECT COUNT(*)::int AS n FROM cms_components WHERE enabled=true`)
-    ]);
-
-    return res.json({
-      ok: true,
-      users: users.rows[0].n,
-      staff: staff.rows[0].n,
-      active_ads: ads.rows[0].n,
-      cms_items: cms.rows[0].n
-    });
-  } catch (error) {
-    console.error(
-      "Maya overview compatibility error:",
-      error
-    );
-
-    return res.status(500).json({
-      ok: false,
-      error: "Could not load admin overview"
-    });
-  }
-});
-
-
-// ============================================================
-// HELPERS
-// ============================================================
-
-function cleanText(value) {
-  if (
-    value === undefined ||
-    value === null
-  ) {
-    return null;
-  }
-
-  const text = String(value).trim();
-
-  return text || null;
-}
-
-function normalizeEmail(email) {
-  if (!email) {
-    return null;
-  }
-
-  return String(email)
-    .trim()
-    .toLowerCase();
-}
-
-function normalizePhone(phone) {
-  if (!phone) {
-    return null;
-  }
-
-  return String(phone)
-    .trim()
-    .replace(/[^\d+]/g, "");
-}
-
-function normalizeUsername(username) {
-  if (!username) {
-    return null;
-  }
-
-  let value = String(username)
-    .trim()
-    .toLowerCase();
-
-  value = value.replace(/^@/, "");
-
-  if (!value) {
-    return null;
-  }
-
-  return value;
-}
-
-function getClientIp(req) {
-  return (
-    req.headers["x-forwarded-for"]
-      ?.split(",")[0]
-      ?.trim() ||
-    req.socket?.remoteAddress ||
-    null
-  );
-}
-
-// ============================================================
-// PASSWORD HASHING
-// ============================================================
-
-function hashPassword(password) {
-  const salt =
-    crypto.randomBytes(16).toString("hex");
-
-  const hash =
-    crypto.scryptSync(
-      password,
-      salt,
-      64
-    ).toString("hex");
-
-  return `${salt}:${hash}`;
-}
-
-function verifyPassword(
-  password,
-  storedHash
-) {
-  if (!storedHash) {
-    return false;
-  }
-
-  const parts =
-    storedHash.split(":");
-
-  if (parts.length !== 2) {
-    return false;
-  }
-
-  const salt = parts[0];
-  const stored = parts[1];
-
-  try {
-    const calculated =
-      crypto.scryptSync(
-        password,
-        salt,
-        64
-      ).toString("hex");
-
-    const a =
-      Buffer.from(
-        stored,
-        "hex"
-      );
-
-    const b =
-      Buffer.from(
-        calculated,
-        "hex"
-      );
-
-    if (a.length !== b.length) {
-      return false;
-    }
-
-    return crypto.timingSafeEqual(
-      a,
-      b
-    );
-
-  } catch {
-    return false;
-  }
-}
-
-// ============================================================
-// JWT
-// ============================================================
-
-function base64url(input) {
-  return Buffer.from(input)
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
-}
-
-function createJWT(
-  payload,
-  expiresInSeconds =
-    60 * 60 * 24 * 30
-) {
-  if (!JWT_SECRET) {
-    throw new Error(
-      "JWT_SECRET is not configured"
-    );
-  }
-
-  const header = {
-    alg: "HS256",
-    typ: "JWT"
-  };
-
-  const now =
-    Math.floor(
-      Date.now() / 1000
-    );
-
-  const body = {
-    ...payload,
-    iat: now,
-    exp:
-      now + expiresInSeconds
-  };
-
-  const encodedHeader =
-    base64url(
-      JSON.stringify(header)
-    );
-
-  const encodedBody =
-    base64url(
-      JSON.stringify(body)
-    );
-
-  const unsigned =
-    `${encodedHeader}.${encodedBody}`;
-
-  const signature =
-    crypto
-      .createHmac(
-        "sha256",
-        JWT_SECRET
-      )
-      .update(unsigned)
-      .digest("base64")
-      .replace(/\+/g, "-")
-      .replace(/\//g, "_")
-      .replace(/=+$/g, "");
-
-  return (
-    `${unsigned}.${signature}`
-  );
-}
-
-function verifyJWT(token) {
-  try {
-    if (
-      !JWT_SECRET ||
-      !token
-    ) {
-      return null;
-    }
-
-    const parts =
-      token.split(".");
-
-    if (parts.length !== 3) {
-      return null;
-    }
-
-    const [
-      header,
-      payload,
-      signature
-    ] = parts;
-
-    const unsigned =
-      `${header}.${payload}`;
-
-    const expected =
-      crypto
-        .createHmac(
-          "sha256",
-          JWT_SECRET
-        )
-        .update(unsigned)
-        .digest("base64")
-        .replace(/\+/g, "-")
-        .replace(/\//g, "_")
-        .replace(/=+$/g, "");
-
-    const a =
-      Buffer.from(signature);
-
-    const b =
-      Buffer.from(expected);
-
-    if (a.length !== b.length) {
-      return null;
-    }
-
-    if (
-      !crypto.timingSafeEqual(
-        a,
-        b
-      )
-    ) {
-      return null;
-    }
-
-    const decoded =
-      JSON.parse(
-        Buffer.from(
-          payload,
-          "base64url"
-        ).toString("utf8")
-      );
-
-    if (!decoded.exp) {
-      return null;
-    }
-
-    if (
-      Math.floor(
-        Date.now() / 1000
-      ) >= decoded.exp
-    ) {
-      return null;
-    }
-
-    if (!decoded.userId) {
-      return null;
-    }
-
-    return decoded;
-
-  } catch {
-    return null;
-  }
-}
-
-// ============================================================
-// BEARER TOKEN
-// ============================================================
-
-function getBearerToken(req) {
-  const header =
-    req.headers.authorization || "";
-
-  if (
-    !header.startsWith(
-      "Bearer "
-    )
-  ) {
-    return null;
-  }
-
-  return header
-    .substring(7)
-    .trim();
-}
-
-// ============================================================
-// AUTH MIDDLEWARE
-// ============================================================
-
-async function authenticateRequest(
-  req,
-  res,
-  next
-) {
-  try {
-    const token =
-      getBearerToken(req);
-
-    if (!token) {
-      return res.status(401).json({
-        ok: false,
-        error:
-          "Authentication required"
-      });
-    }
-
-    const decoded =
-      verifyJWT(token);
-
-    if (
-      !decoded ||
-      !decoded.userId
-    ) {
-      return res.status(401).json({
-        ok: false,
-        error:
-          "Invalid or expired session"
-      });
-    }
-
-    const result =
-      await pool.query(
-        `
-        SELECT
-          id,
-          telegram_id,
-          first_name,
-          last_name,
-          username,
-          language_code,
-          photo_url,
-          full_name,
-          email,
-          phone,
-          password_hash,
-          balance,
-          status,
-          last_login_source,
-          last_login_at,
-          created_at,
-          updated_at
-        FROM users
-        WHERE id = $1
-        LIMIT 1
-        `,
-        [decoded.userId]
-      );
-
-    if (
-      result.rows.length === 0
-    ) {
-      return res.status(401).json({
-        ok: false,
-        error:
-          "User account not found"
-      });
-    }
-
-    const user =
-      result.rows[0];
-
-    if (
-      user.status !== "active"
-    ) {
-      return res.status(403).json({
-        ok: false,
-        error:
-          "Account is not active"
-      });
-    }
-
-    req.user = user;
-
-    next();
-
-  } catch (error) {
-    console.error(
-      "Authentication middleware error:",
-      error
-    );
-
-    return res.status(500).json({
-      ok: false,
-      error:
-        "Authentication failed"
-    });
-  }
-}
-
-// ============================================================
-// AUTH EVENT LOG
-// ============================================================
-
-async function logAuthEvent(
-  req,
-  userId,
-  eventType,
-  source,
-  metadata = {}
-) {
-  try {
-    await pool.query(
-      `
-      INSERT INTO auth_events (
-        user_id,
-        event_type,
-        source,
-        ip,
-        user_agent,
-        metadata,
-        created_at
-      )
-      VALUES (
-        $1,
-        $2,
-        $3,
-        $4,
-        $5,
-        $6,
-        NOW()
-      )
-      `,
-      [
-        userId || null,
-        eventType,
-        source || null,
-        getClientIp(req),
-        req.headers["user-agent"] ||
-          null,
-        JSON.stringify(metadata)
-      ]
-    );
-
-  } catch (error) {
-    console.error(
-      "Auth event logging error:",
-      error.message
-    );
-  }
-}
-
-// ============================================================
-// DATABASE SETUP / MIGRATION
-// ============================================================
-
-async function ensureDatabase() {
-
-  // ----------------------------------------------------------
-  // USERS
-  // ----------------------------------------------------------
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS users (
-      id BIGSERIAL PRIMARY KEY,
-
-      telegram_id BIGINT UNIQUE,
-
-      first_name TEXT,
-      last_name TEXT,
-
-      username TEXT,
-
-      language_code TEXT,
-      photo_url TEXT,
-
-      full_name TEXT,
-
-      email TEXT,
-      phone TEXT,
-
-      password_hash TEXT,
-
-      balance NUMERIC(12,2)
-        NOT NULL DEFAULT 0,
-
-      status TEXT
-        NOT NULL DEFAULT 'active',
-
-      last_login_source TEXT,
-      last_login_at TIMESTAMPTZ,
-
-      created_at TIMESTAMPTZ
-        NOT NULL DEFAULT NOW(),
-
-      updated_at TIMESTAMPTZ
-        NOT NULL DEFAULT NOW()
-    )
-  `);
-
-  // ----------------------------------------------------------
-  // OLD DATABASE COMPATIBILITY
-  // ----------------------------------------------------------
-
-  await pool.query(`
-    ALTER TABLE users
-    ALTER COLUMN telegram_id
-    DROP NOT NULL
-  `);
-
-  // ----------------------------------------------------------
-  // MISSING COLUMNS
-  // ----------------------------------------------------------
-
-  await pool.query(`
-    ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS
-    username TEXT
-  `);
-
-  await pool.query(`
-    ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS
-    full_name TEXT
-  `);
-
-  await pool.query(`
-    ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS
-    email TEXT
-  `);
-
-  await pool.query(`
-    ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS
-    phone TEXT
-  `);
-
-  await pool.query(`
-    ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS
-    password_hash TEXT
-  `);
-
-  await pool.query(`
-    ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS
-    status TEXT
-    NOT NULL DEFAULT 'active'
-  `);
-
-  await pool.query(`
-    ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS
-    last_login_source TEXT
-  `);
-
-  await pool.query(`
-    ALTER TABLE users
-    ADD COLUMN IF NOT EXISTS
-    last_login_at TIMESTAMPTZ
-  `);
-
-  // ----------------------------------------------------------
-  // UNIQUE USERNAME
-  // ----------------------------------------------------------
-
-  await pool.query(`
-    CREATE UNIQUE INDEX IF NOT EXISTS
-    users_username_unique_idx
-    ON users (LOWER(username))
-    WHERE username IS NOT NULL
-  `);
-
-  // ----------------------------------------------------------
-  // UNIQUE EMAIL
-  // ----------------------------------------------------------
-
-  await pool.query(`
-    CREATE UNIQUE INDEX IF NOT EXISTS
-    users_email_unique_idx
-    ON users (LOWER(email))
-    WHERE email IS NOT NULL
-  `);
-
-  // ----------------------------------------------------------
-  // UNIQUE PHONE
-  // ----------------------------------------------------------
-
-  await pool.query(`
-    CREATE UNIQUE INDEX IF NOT EXISTS
-    users_phone_unique_idx
-    ON users (phone)
-    WHERE phone IS NOT NULL
-  `);
-
-  // ----------------------------------------------------------
-  // AUTH EVENTS
-  // ----------------------------------------------------------
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS auth_events (
-      id BIGSERIAL PRIMARY KEY,
-
-      user_id BIGINT,
-
-      event_type TEXT NOT NULL,
-
-      source TEXT,
-
-      ip TEXT,
-
-      user_agent TEXT,
-
-      metadata JSONB,
-
-      created_at TIMESTAMPTZ
-        NOT NULL DEFAULT NOW()
-    )
-  `);
-
-  // ----------------------------------------------------------
-  // AUTH EVENT INDEXES
-  // ----------------------------------------------------------
-
-  await pool.query(`
-    CREATE INDEX IF NOT EXISTS
-    auth_events_user_id_idx
-    ON auth_events(user_id)
-  `);
-
-  await pool.query(`
-    CREATE INDEX IF NOT EXISTS
-    auth_events_created_at_idx
-    ON auth_events(created_at)
-  `);
-
-  console.log(
-    "Database migration completed"
-  );
-}
-
-// ============================================================
-// TELEGRAM INIT DATA VALIDATION
-// ============================================================
-
-function validateTelegramInitData(
-  initData
-) {
-  if (!initData) {
-    return null;
-  }
-
-  if (
-    !process.env.TELEGRAM_BOT_TOKEN
-  ) {
-    return null;
-  }
-
-  try {
-    const params =
-      new URLSearchParams(
-        initData
-      );
-
-    const hash =
-      params.get("hash");
-
-    if (!hash) {
-      return null;
-    }
-
-    params.delete("hash");
-
-    const dataCheckString =
-      [...params.entries()]
-        .sort(
-          ([a], [b]) =>
-            a.localeCompare(b)
-        )
-        .map(
-          ([key, value]) =>
-            `${key}=${value}`
-        )
-        .join("\n");
-
-    const secretKey =
-      crypto
-        .createHmac(
-          "sha256",
-          "WebAppData"
-        )
-        .update(
-          process.env.TELEGRAM_BOT_TOKEN
-        )
-        .digest();
-
-    const calculatedHash =
-      crypto
-        .createHmac(
-          "sha256",
-          secretKey
-        )
-        .update(
-          dataCheckString
-        )
-        .digest("hex");
-
-    const a =
-      Buffer.from(
-        calculatedHash,
-        "hex"
-      );
-
-    const b =
-      Buffer.from(
-        hash,
-        "hex"
-      );
-
-    if (
-      a.length !== b.length
-    ) {
-      return null;
-    }
-
-    if (
-      !crypto.timingSafeEqual(
-        a,
-        b
-      )
-    ) {
-      return null;
-    }
-
-    const authDate =
-      Number(
-        params.get(
-          "auth_date"
-        )
-      );
-
-    if (!authDate) {
-      return null;
-    }
-
-    const now =
-      Math.floor(
-        Date.now() / 1000
-      );
-
-    // 24 hour validity
-    if (
-      now - authDate > 86400
-    ) {
-      return null;
-    }
-
-    // Reject future timestamp
-    if (
-      authDate - now > 60
-    ) {
-      return null;
-    }
-
-    const userRaw =
-      params.get("user");
-
-    if (!userRaw) {
-      return null;
-    }
-
-    const telegramUser =
-      JSON.parse(userRaw);
-
-    if (!telegramUser.id) {
-      return null;
-    }
-
-    return telegramUser;
-
-  } catch (error) {
-    console.error(
-      "Telegram validation error:",
-      error.message
-    );
-
-    return null;
-  }
-}
-
-// ============================================================
-// PUBLIC USER
-// ============================================================
-
-function publicUser(user) {
-  if (!user) {
-    return null;
-  }
-
-  return {
-    id: user.id,
-
-    telegram_id:
-      user.telegram_id,
-
-    first_name:
-      user.first_name,
-
-    last_name:
-      user.last_name,
-
-    username:
-      user.username,
-
-    language_code:
-      user.language_code,
-
-    photo_url:
-      user.photo_url,
-
-    full_name:
-      user.full_name,
-
-    email:
-      user.email,
-
-    phone:
-      user.phone,
-
-    balance:
-      user.balance,
-
-    status:
-      user.status,
-
-    last_login_source:
-      user.last_login_source,
-
-    last_login_at:
-      user.last_login_at,
-
-    created_at:
-      user.created_at,
-
-    updated_at:
-      user.updated_at
-  };
-}
-
-// ============================================================
-// BASIC ROUTES
-// ============================================================
-
-app.get("/", (req, res) => {
-  res.json({
-    ok: true,
-    app: "DDR Backend",
-    version: "3.1.0",
-    message:
-      "Unified Account Backend with Maya Control Center is running"
-  });
-});
-
-app.get(
-  "/api/health",
-  (req, res) => {
-    res.json({
-      ok: true,
-      service:
-        "ddr-backend",
-      version: "3.1.0",
-      controlCenter:
-        true,
-      time:
-        new Date().toISOString()
-    });
-  }
-);
-
-app.get(
-  "/api/config",
-  (req, res) => {
-    res.json({
-      ok: true,
-
-      appName: "Maya",
-
-      backendVersion:
-        "3.1.0",
-
-      telegramMiniApp:
-        true,
-
-      controlCenter:
-        true,
-
-      authentication: {
-        username: true,
-        email: true,
-        phone: true,
-        password: true,
-        telegram: true,
-
-        google: false,
-        facebook: false
-      }
-    });
-  }
-);
-
-app.get(
-  "/api/db-test",
-  async (req, res) => {
-    try {
-      const result =
-        await pool.query(
-          "SELECT NOW() AS time"
-        );
-
-      res.json({
-        ok: true,
-        database:
-          "connected",
-        time:
-          result.rows[0].time
-      });
-
-    } catch (error) {
-      console.error(
-        "Database error:",
-        error.message
-      );
-
-      res.status(500).json({
-        ok: false,
-        database:
-          "connection_failed"
-      });
-    }
-  }
-);
-
-// ============================================================
-// REGISTER
-// ============================================================
-
-app.post(
-  "/api/auth/register",
-  async (req, res) => {
-    try {
-      const name =
-        cleanText(
-          req.body.name
-        );
-
-      const username =
-        normalizeUsername(
-          req.body.username
-        );
-
-      const email =
-        normalizeEmail(
-          req.body.email
-        );
-
-      const phone =
-        normalizePhone(
-          req.body.phone
-        );
-
-      const password =
-        String(
-          req.body.password || ""
-        );
-
-      if (!name) {
-        return res.status(400).json({
-          ok: false,
-          error:
-            "Name is required"
-        });
-      }
-
-      if (!username) {
-        return res.status(400).json({
-          ok: false,
-          error:
-            "Username is required"
-        });
-      }
-
-      if (
-        !/^[a-z0-9_]{3,32}$/i.test(
-          username
-        )
-      ) {
-        return res.status(400).json({
-          ok: false,
-          error:
-            "Username must be 3-32 characters and contain only letters, numbers or underscore"
-        });
-      }
-
-      if (!email && !phone) {
-        return res.status(400).json({
-          ok: false,
-          error:
-            "Email or phone is required"
-        });
-      }
-
-      if (password.length < 8) {
-        return res.status(400).json({
-          ok: false,
-          error:
-            "Password must be at least 8 characters"
-        });
-      }
-
-      const usernameResult =
-        await pool.query(
-          `
-          SELECT id
-          FROM users
-          WHERE LOWER(username)
-                = LOWER($1)
-          LIMIT 1
-          `,
-          [username]
-        );
-
-      if (
-        usernameResult.rows.length
-      ) {
-        return res.status(409).json({
-          ok: false,
-          error:
-            "Username is already used"
-        });
-      }
-
-      if (email) {
-        const emailResult =
-          await pool.query(
-            `
-            SELECT id
-            FROM users
-            WHERE LOWER(email)
-                  = LOWER($1)
-            LIMIT 1
-            `,
-            [email]
-          );
-
-        if (
-          emailResult.rows.length
-        ) {
-          return res.status(409).json({
-            ok: false,
-            error:
-              "Email is already used"
-          });
-        }
-      }
-
-      if (phone) {
-        const phoneResult =
-          await pool.query(
-            `
-            SELECT id
-            FROM users
-            WHERE phone = $1
-            LIMIT 1
-            `,
-            [phone]
-          );
-
-        if (
-          phoneResult.rows.length
-        ) {
-          return res.status(409).json({
-            ok: false,
-            error:
-              "Phone is already used"
-          });
-        }
-      }
-
-      const passwordHash =
-        hashPassword(
-          password
-        );
-
-      const result =
-        await pool.query(
-          `
-          INSERT INTO users (
-            first_name,
-            full_name,
-            username,
-            email,
-            phone,
-            password_hash,
-            status,
-            last_login_source,
-            last_login_at,
-            updated_at
-          )
-          VALUES (
-            $1,
-            $2,
-            $3,
-            $4,
-            $5,
-            $6,
-            'active',
-            'password',
-            NOW(),
-            NOW()
-          )
-          RETURNING *
-          `,
-          [
-            name,
-            name,
-            username,
-            email,
-            phone,
-            passwordHash
-          ]
-        );
-
-      const user =
-        result.rows[0];
-
-      await logAuthEvent(
-        req,
-        user.id,
-        "register",
-        "password"
-      );
-
-      const token =
-        createJWT({
-          userId: user.id
-        });
-
-      res.status(201).json({
-        ok: true,
-        token,
-        user:
-          publicUser(user)
-      });
-
-    } catch (error) {
-      console.error(
-        "Register error:",
-        error
-      );
-
-      res.status(500).json({
-        ok: false,
-        error:
-          "Registration failed"
-      });
-    }
-  }
-);
-
-// ============================================================
-// LOGIN
-// ============================================================
-
-app.post(
-  "/api/auth/login",
-  async (req, res) => {
-    try {
-      const login =
-        cleanText(
-          req.body.login
-        );
-
-      const password =
-        String(
-          req.body.password || ""
-        );
-
-      if (
-        !login ||
-        !password
-      ) {
-        return res.status(400).json({
-          ok: false,
-          error:
-            "Username, email or phone and password are required"
-        });
-      }
-
-      const username =
-        normalizeUsername(
-          login
-        );
-
-      const email =
-        normalizeEmail(
-          login
-        );
-
-      const phone =
-        normalizePhone(
-          login
-        );
-
-      const result =
-        await pool.query(
-          `
-          SELECT *
-          FROM users
-          WHERE
-            (
-              username IS NOT NULL
-              AND LOWER(username)
-                  = LOWER($1)
-            )
-            OR
-            (
-              email IS NOT NULL
-              AND LOWER(email)
-                  = LOWER($2)
-            )
-            OR
-            (
-              phone IS NOT NULL
-              AND phone = $3
-            )
-          LIMIT 1
-          `,
-          [
-            username,
-            email,
-            phone
-          ]
-        );
-
-      if (
-        result.rows.length === 0
-      ) {
-        await logAuthEvent(
-          req,
-          null,
-          "login_failed",
-          "password"
-        );
-
-        return res.status(401).json({
-          ok: false,
-          error:
-            "Invalid login or password"
-        });
-      }
-
-      const user =
-        result.rows[0];
-
-      if (
-        user.status !== "active"
-      ) {
-        return res.status(403).json({
-          ok: false,
-          error:
-            "This account is not active"
-        });
-      }
-
-      if (
-        !verifyPassword(
-          password,
-          user.password_hash
-        )
-      ) {
-        await logAuthEvent(
-          req,
-          user.id,
-          "login_failed",
-          "password"
-        );
-
-        return res.status(401).json({
-          ok: false,
-          error:
-            "Invalid login or password"
-        });
-      }
-
-      const updated =
-        await pool.query(
-          `
-          UPDATE users
-          SET
-            last_login_source =
-              'password',
-            last_login_at =
-              NOW(),
-            updated_at =
-              NOW()
-          WHERE id = $1
-          RETURNING *
-          `,
-          [user.id]
-        );
-
-      const updatedUser =
-        updated.rows[0];
-
-      await logAuthEvent(
-        req,
-        user.id,
-        "login",
-        "password"
-      );
-
-      const token =
-        createJWT({
-          userId:
-            user.id
-        });
-
-      res.json({
-        ok: true,
-        token,
-        user:
-          publicUser(
-            updatedUser
-          )
-      });
-
-    } catch (error) {
-      console.error(
-        "Login error:",
-        error
-      );
-
-      res.status(500).json({
-        ok: false,
-        error:
-          "Login failed"
-      });
-    }
-  }
-);
-
-// ============================================================
-// TELEGRAM LOGIN / LINK
-// ============================================================
-
-app.post(
-  "/api/auth/telegram",
-  async (req, res) => {
-    try {
-      const initData =
-        req.headers[
-          "x-telegram-init-data"
-        ];
-
-      const telegramUser =
-        validateTelegramInitData(
-          initData
-        );
-
-      if (!telegramUser) {
-        return res.status(401).json({
-          ok: false,
-          error:
-            "Invalid Telegram authentication"
-        });
-      }
-
-      const telegramId =
-        String(
-          telegramUser.id
-        );
-
-      const bearer =
-        getBearerToken(req);
-
-      const jwtUser =
-        bearer
-          ? verifyJWT(bearer)
-          : null;
-
-      // ======================================================
-      // EXISTING LOGGED-IN ACCOUNT
-      // LINK TELEGRAM
-      // ======================================================
-
-      if (
-        jwtUser &&
-        jwtUser.userId
-      ) {
-        const existingTelegram =
-          await pool.query(
-            `
-            SELECT *
-            FROM users
-            WHERE telegram_id = $1
-            LIMIT 1
-            `,
-            [telegramId]
-          );
-
-        if (
-          existingTelegram.rows.length &&
-          String(
-            existingTelegram.rows[0].id
-          ) !==
-            String(
-              jwtUser.userId
-            )
-        ) {
-          return res.status(409).json({
-            ok: false,
-            error:
-              "This Telegram account is already linked to another account"
-          });
-        }
-
-        const result =
-          await pool.query(
-            `
-            UPDATE users
-            SET
-              telegram_id = $1,
-
-              first_name =
-                COALESCE(
-                  $2,
-                  first_name
-                ),
-
-              last_name =
-                COALESCE(
-                  $3,
-                  last_name
-                ),
-
-              language_code =
-                COALESCE(
-                  $4,
-                  language_code
-                ),
-
-              photo_url =
-                COALESCE(
-                  $5,
-                  photo_url
-                ),
-
-              last_login_source =
-                'telegram',
-
-              last_login_at =
-                NOW(),
-
-              updated_at =
-                NOW()
-
-            WHERE id = $6
-
-            RETURNING *
-            `,
-            [
-              telegramId,
-              telegramUser.first_name ||
-                null,
-              telegramUser.last_name ||
-                null,
-              telegramUser.language_code ||
-                null,
-              telegramUser.photo_url ||
-                null,
-              jwtUser.userId
-            ]
-          );
-
-        const user =
-          result.rows[0];
-
-        await logAuthEvent(
-          req,
-          user.id,
-          "telegram_link",
-          "telegram",
-          {
-            telegram_id:
-              telegramId
-          }
-        );
-
-        const token =
-          createJWT({
-            userId:
-              user.id
-          });
-
-        return res.json({
-          ok: true,
-          linked: true,
-          token,
-          user:
-            publicUser(user)
-        });
-      }
-
-      // ======================================================
-      // TELEGRAM ACCOUNT EXISTS
-      // ======================================================
-
-      const existing =
-        await pool.query(
-          `
-          SELECT *
-          FROM users
-          WHERE telegram_id = $1
-          LIMIT 1
-          `,
-          [telegramId]
-        );
-
-      if (
-        existing.rows.length
-      ) {
-        const result =
-          await pool.query(
-            `
-            UPDATE users
-            SET
-              first_name = $1,
-              last_name = $2,
-              language_code = $3,
-              photo_url = $4,
-
-              last_login_source =
-                'telegram',
-
-              last_login_at =
-                NOW(),
-
-              updated_at =
-                NOW()
-
-            WHERE telegram_id = $5
-
-            RETURNING *
-            `,
-            [
-              telegramUser.first_name ||
-                null,
-              telegramUser.last_name ||
-                null,
-              telegramUser.language_code ||
-                null,
-              telegramUser.photo_url ||
-                null,
-              telegramId
-            ]
-          );
-
-        const user =
-          result.rows[0];
-
-        await logAuthEvent(
-          req,
-          user.id,
-          "login",
-          "telegram"
-        );
-
-        const token =
-          createJWT({
-            userId:
-              user.id
-          });
-
-        console.log(
-          "Telegram auth success"
-        );
-
-        return res.json({
-          ok: true,
-          linked: true,
-          token,
-          user:
-            publicUser(user)
-        });
-      }
-
-      // ======================================================
-      // NEW TELEGRAM ACCOUNT
-      // ======================================================
-
-      const result =
-        await pool.query(
-          `
-          INSERT INTO users (
-            telegram_id,
-            first_name,
-            last_name,
-            username,
-            language_code,
-            photo_url,
-            status,
-            last_login_source,
-            last_login_at,
-            updated_at
-          )
-          VALUES (
-            $1,
-            $2,
-            $3,
-            $4,
-            $5,
-            $6,
-            'active',
-            'telegram',
-            NOW(),
-            NOW()
-          )
-          RETURNING *
-          `,
-          [
-            telegramId,
-
-            telegramUser.first_name ||
-              null,
-
-            telegramUser.last_name ||
-              null,
-
-            telegramUser.username
-              ? normalizeUsername(
-                  telegramUser.username
-                )
-              : null,
-
-            telegramUser.language_code ||
-              null,
-
-            telegramUser.photo_url ||
-              null
-          ]
-        );
-
-      const user =
-        result.rows[0];
-
-      await logAuthEvent(
-        req,
-        user.id,
-        "register",
-        "telegram"
-      );
-
-      const token =
-        createJWT({
-          userId:
-            user.id
-        });
-
-      console.log(
-        "Telegram auth success"
-      );
-
-      res.status(201).json({
-        ok: true,
-        linked: false,
-        token,
-        user:
-          publicUser(user)
-      });
-
-    } catch (error) {
-      console.error(
-        "Telegram auth error:",
-        error
-      );
-
-      res.status(500).json({
-        ok: false,
-        error:
-          "Telegram authentication failed"
-      });
-    }
-  }
-);
-
-// ============================================================
-// SET CREDENTIALS
-// ============================================================
-
-app.post(
-  "/api/auth/set-credentials",
-  authenticateRequest,
-  async (req, res) => {
-    try {
-      const username =
-        normalizeUsername(
-          req.body.username
-        );
-
-      const email =
-        normalizeEmail(
-          req.body.email
-        );
-
-      const phone =
-        normalizePhone(
-          req.body.phone
-        );
-
-      const password =
-        String(
-          req.body.password || ""
-        );
-
-      if (!username) {
-        return res.status(400).json({
-          ok: false,
-          error:
-            "Username is required"
-        });
-      }
-
-      if (
-        !/^[a-z0-9_]{3,32}$/i.test(
-          username
-        )
-      ) {
-        return res.status(400).json({
-          ok: false,
-          error:
-            "Invalid username"
-        });
-      }
-
-      if (!email && !phone) {
-        return res.status(400).json({
-          ok: false,
-          error:
-            "Email or phone is required"
-        });
-      }
-
-      if (password.length < 8) {
-        return res.status(400).json({
-          ok: false,
-          error:
-            "Password must be at least 8 characters"
-        });
-      }
-
-      const usernameConflict =
-        await pool.query(
-          `
-          SELECT id
-          FROM users
-          WHERE
-            LOWER(username)
-              = LOWER($1)
-            AND id <> $2
-          LIMIT 1
-          `,
-          [
-            username,
-            req.user.id
-          ]
-        );
-
-      if (
-        usernameConflict.rows.length
-      ) {
-        return res.status(409).json({
-          ok: false,
-          error:
-            "Username is already used by another account"
-        });
-      }
-
-      if (email) {
-        const result =
-          await pool.query(
-            `
-            SELECT id
-            FROM users
-            WHERE
-              LOWER(email)
-                = LOWER($1)
-              AND id <> $2
-            LIMIT 1
-            `,
-            [
-              email,
-              req.user.id
-            ]
-          );
-
-        if (
-          result.rows.length
-        ) {
-          return res.status(409).json({
-            ok: false,
-            error:
-              "Email is already used by another account"
-          });
-        }
-      }
-
-      if (phone) {
-        const result =
-          await pool.query(
-            `
-            SELECT id
-            FROM users
-            WHERE
-              phone = $1
-              AND id <> $2
-            LIMIT 1
-            `,
-            [
-              phone,
-              req.user.id
-            ]
-          );
-
-        if (
-          result.rows.length
-        ) {
-          return res.status(409).json({
-            ok: false,
-            error:
-              "Phone is already used by another account"
-          });
-        }
-      }
-
-      const passwordHash =
-        hashPassword(
-          password
-        );
-
-      const result =
-        await pool.query(
-          `
-          UPDATE users
-          SET
-            username = $1,
-            email =
-              COALESCE(
-                $2,
-                email
-              ),
-            phone =
-              COALESCE(
-                $3,
-                phone
-              ),
-            password_hash = $4,
-            updated_at = NOW()
-
-          WHERE id = $5
-
-          RETURNING *
-          `,
-          [
-            username,
-            email,
-            phone,
-            passwordHash,
-            req.user.id
-          ]
-        );
-
-      const user =
-        result.rows[0];
-
-      await logAuthEvent(
-        req,
-        user.id,
-        "credentials_updated",
-        "account"
-      );
-
-      const token =
-        createJWT({
-          userId:
-            user.id
-        });
-
-      res.json({
-        ok: true,
-        token,
-        user:
-          publicUser(user)
-      });
-
-    } catch (error) {
-      console.error(
-        "Set credentials error:",
-        error
-      );
-
-      res.status(500).json({
-        ok: false,
-        error:
-          "Could not update credentials"
-      });
-    }
-  }
-);
-
-// ============================================================
-// GET CURRENT USER
-// ============================================================
-
-app.get(
-  "/api/me",
-  authenticateRequest,
-  async (req, res) => {
-    res.json({
-      ok: true,
-      user:
-        publicUser(
-          req.user
-        )
-    });
-  }
-);
-
-// ============================================================
-// UPDATE PROFILE
-// ============================================================
-
-app.patch(
-  "/api/me",
-  authenticateRequest,
-  async (req, res) => {
-    try {
-      const fullName =
-        cleanText(
-          req.body.full_name
-        );
-
-      const firstName =
-        cleanText(
-          req.body.first_name
-        );
-
-      const lastName =
-        cleanText(
-          req.body.last_name
-        );
-
-      const username =
-        normalizeUsername(
-          req.body.username
-        );
-
-      const email =
-        normalizeEmail(
-          req.body.email
-        );
-
-      const phone =
-        normalizePhone(
-          req.body.phone
-        );
-
-      if (username) {
-        if (
-          !/^[a-z0-9_]{3,32}$/i.test(
-            username
-          )
-        ) {
-          return res.status(400).json({
-            ok: false,
-            error:
-              "Invalid username"
-          });
-        }
-
-        const conflict =
-          await pool.query(
-            `
-            SELECT id
-            FROM users
-            WHERE
-              LOWER(username)
-                = LOWER($1)
-              AND id <> $2
-            LIMIT 1
-            `,
-            [
-              username,
-              req.user.id
-            ]
-          );
-
-        if (
-          conflict.rows.length
-        ) {
-          return res.status(409).json({
-            ok: false,
-            error:
-              "Username already belongs to another account"
-          });
-        }
-      }
-
-      if (email) {
-        const conflict =
-          await pool.query(
-            `
-            SELECT id
-            FROM users
-            WHERE
-              LOWER(email)
-                = LOWER($1)
-              AND id <> $2
-            LIMIT 1
-            `,
-            [
-              email,
-              req.user.id
-            ]
-          );
-
-        if (
-          conflict.rows.length
-        ) {
-          return res.status(409).json({
-            ok: false,
-            error:
-              "Email already belongs to another account"
-          });
-        }
-      }
-
-      if (phone) {
-        const conflict =
-          await pool.query(
-            `
-            SELECT id
-            FROM users
-            WHERE
-              phone = $1
-              AND id <> $2
-            LIMIT 1
-            `,
-            [
-              phone,
-              req.user.id
-            ]
-          );
-
-        if (
-          conflict.rows.length
-        ) {
-          return res.status(409).json({
-            ok: false,
-            error:
-              "Phone already belongs to another account"
-          });
-        }
-      }
-
-      const result =
-        await pool.query(
-          `
-          UPDATE users
-          SET
-            full_name =
-              COALESCE(
-                $1,
-                full_name
-              ),
-
-            first_name =
-              COALESCE(
-                $2,
-                first_name
-              ),
-
-            last_name =
-              COALESCE(
-                $3,
-                last_name
-              ),
-
-            username =
-              COALESCE(
-                $4,
-                username
-              ),
-
-            email =
-              COALESCE(
-                $5,
-                email
-              ),
-
-            phone =
-              COALESCE(
-                $6,
-                phone
-              ),
-
-            updated_at =
-              NOW()
-
-          WHERE id = $7
-
-          RETURNING *
-          `,
-          [
-            fullName,
-            firstName,
-            lastName,
-            username,
-            email,
-            phone,
-            req.user.id
-          ]
-        );
-
-      const user =
-        result.rows[0];
-
-      await logAuthEvent(
-        req,
-        user.id,
-        "profile_updated",
-        "account"
-      );
-
-      res.json({
-        ok: true,
-        user:
-          publicUser(user)
-      });
-
-    } catch (error) {
-      console.error(
-        "Profile update error:",
-        error
-      );
-
-      res.status(500).json({
-        ok: false,
-        error:
-          "Profile update failed"
-      });
-    }
-  }
-);
-
-// ============================================================
-// ADMIN AUTHENTICATION
-// ============================================================
-
-function requireAdmin(
-  req,
-  res,
-  next
-) {
-  const key =
-    req.headers[
-      "x-admin-key"
-    ];
-
-  if (
-    !ADMIN_KEY ||
-    !key ||
-    key !== ADMIN_KEY
-  ) {
-    return res.status(403).json({
-      ok: false,
-      error:
-        "Admin access denied"
-    });
-  }
-
-  next();
-}
-
-// ============================================================
-// ADMIN - USERS
-// ============================================================
-
-app.get(
-  "/api/admin/users",
-  requireAdmin,
-  async (req, res) => {
-    try {
-      const result =
-        await pool.query(
-          `
-          SELECT
-            id,
-            telegram_id,
-            first_name,
-            last_name,
-            username,
-            full_name,
-            email,
-            phone,
-            balance,
-            status,
-            last_login_source,
-            last_login_at,
-            created_at,
-            updated_at
-          FROM users
-          ORDER BY id DESC
-          LIMIT 1000
-          `
-        );
-
-      res.json({
-        ok: true,
-        count:
-          result.rows.length,
-        users:
-          result.rows
-      });
-
-    } catch (error) {
-      console.error(
-        "Admin users error:",
-        error
-      );
-
-      res.status(500).json({
-        ok: false,
-        error:
-          "Could not load users"
-      });
-    }
-  }
-);
-
-// ============================================================
-// ADMIN - AUTH EVENTS
-// ============================================================
-
-app.get(
-  "/api/admin/auth-events",
-  requireAdmin,
-  async (req, res) => {
-    try {
-      const result =
-        await pool.query(
-          `
-          SELECT
-            id,
-            user_id,
-            event_type,
-            source,
-            ip,
-            user_agent,
-            metadata,
-            created_at
-          FROM auth_events
-          ORDER BY id DESC
-          LIMIT 1000
-          `
-        );
-
-      res.json({
-        ok: true,
-        count:
-          result.rows.length,
-        events:
-          result.rows
-      });
-
-    } catch (error) {
-      console.error(
-        "Admin auth events error:",
-        error
-      );
-
-      res.status(500).json({
-        ok: false,
-        error:
-          "Could not load authentication events"
-      });
-    }
-  }
-);
-
-// ============================================================
-// PLACEHOLDER TELEGRAM LINK
-// ============================================================
-
-app.post(
-  "/api/auth/telegram-link",
-  authenticateRequest,
-  async (req, res) => {
-    res.status(400).json({
-      ok: false,
-      error:
-        "Use /api/auth/telegram with X-Telegram-Init-Data to link Telegram"
-    });
-  }
-);
-
-// ============================================================
-// 404
-// ============================================================
-
-app.use(
-  (req, res) => {
-    res.status(404).json({
-      ok: false,
-      error:
-        "Route not found"
-    });
-  }
-);
-
-// ============================================================
-// ERROR HANDLER
-// ============================================================
-
-app.use(
-  (
-    err,
-    req,
-    res,
-    next
-  ) => {
-    console.error(
-      "Unhandled error:",
-      err
-    );
-
-    res.status(500).json({
-      ok: false,
-      error:
-        "Internal server error"
-    });
-  }
-);
-
-// ============================================================
-// START SERVER
-// ============================================================
-
-async function startServer() {
-  try {
-    await ensureDatabase();
-
-    // ========================================================
-    // MAYA ADMIN CONTROL CENTER DATABASE
-    // ========================================================
-
-    await ensureControlCenterDatabase(pool);
-
-    await mayaRewardSystem.ensureRewardDatabase();
-
-    console.log(
-      "Maya Reward / Video Delivery database ready"
-    );
-
-    // ========================================================
-    // MAYA CONTROL CENTER SCHEMA COMPATIBILITY MIGRATION
-    // ========================================================
-    // The existing Render database may have been created from an
-    // older schema. CREATE TABLE IF NOT EXISTS does NOT add new
-    // columns to an existing table, so explicitly add columns
-    // required by the current Control Center.
-    // ========================================================
+  async function ensureRewardDatabase() {
     await pool.query(`
-      ALTER TABLE staff_users
-        ADD COLUMN IF NOT EXISTS display_name TEXT,
-        ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ,
-        ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      CREATE TABLE IF NOT EXISTS maya_videos (
+        id BIGSERIAL PRIMARY KEY,
+        title TEXT NOT NULL,
+        description TEXT,
+        telegram_file_id TEXT,
+        video_url TEXT,
+        thumbnail_url TEXT,
+        required_ads INTEGER NOT NULL DEFAULT 3,
+        delivery_ttl_seconds INTEGER NOT NULL DEFAULT 600,
+        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CHECK (required_ads BETWEEN 1 AND 20),
+        CHECK (delivery_ttl_seconds BETWEEN 60 AND 172800)
+      )
     `);
 
-    console.log(
-      "Maya Control Center schema compatibility migration completed"
-    );
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS maya_unlock_sessions (
+        id BIGSERIAL PRIMARY KEY,
+        session_token TEXT NOT NULL UNIQUE,
+        user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        video_id BIGINT NOT NULL REFERENCES maya_videos(id) ON DELETE CASCADE,
+        required_ads INTEGER NOT NULL,
+        verified_ads INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'watching',
+        expires_at TIMESTAMPTZ NOT NULL,
+        delivered_at TIMESTAMPTZ,
+        delivery_message_id BIGINT,
+        delivery_expires_at TIMESTAMPTZ,
+        revoked_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
 
-    console.log(
-      "Database tables ready"
-    );
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS maya_ad_events (
+        id BIGSERIAL PRIMARY KEY,
+        provider TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        ymid TEXT,
+        user_id BIGINT REFERENCES users(id) ON DELETE SET NULL,
+        unlock_session_id BIGINT REFERENCES maya_unlock_sessions(id) ON DELETE SET NULL,
+        event_type TEXT NOT NULL,
+        reward_value NUMERIC(12,2) NOT NULL DEFAULT 0,
+        raw_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(provider, event_id)
+      )
+    `);
 
-    app.listen(
-      PORT,
-      "0.0.0.0",
-      () => {
-        console.log(
-          `DDR backend running on port ${PORT}`
-        );
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS maya_reward_tasks (
+        id BIGSERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        provider TEXT NOT NULL DEFAULT 'monetag',
+        zone_id TEXT,
+        ad_type TEXT NOT NULL DEFAULT 'rewarded_interstitial',
+        reward_amount NUMERIC(12,2) NOT NULL DEFAULT 1,
+        daily_limit INTEGER NOT NULL DEFAULT 20,
+        cooldown_seconds INTEGER NOT NULL DEFAULT 30,
+        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
 
-        console.log(
-          "Maya Admin Control Center routes enabled"
-        );
-      }
-    );
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS maya_earning_sessions (
+        id BIGSERIAL PRIMARY KEY,
+        session_token TEXT NOT NULL UNIQUE,
+        user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        task_id BIGINT NOT NULL REFERENCES maya_reward_tasks(id) ON DELETE CASCADE,
+        ymid TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'watching',
+        expires_at TIMESTAMPTZ NOT NULL,
+        completed_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
 
-  } catch (error) {
-    console.error(
-      "Failed to start server:",
-      error
-    );
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS maya_reward_ledger (
+        id BIGSERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        source TEXT NOT NULL,
+        source_event_id TEXT NOT NULL,
+        amount NUMERIC(12,2) NOT NULL,
+        metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(source, source_event_id)
+      )
+    `);
 
-    process.exit(1);
+    await pool.query(`ALTER TABLE maya_unlock_sessions ADD COLUMN IF NOT EXISTS ymid TEXT`);
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS maya_unlock_ymid_unique ON maya_unlock_sessions(ymid) WHERE ymid IS NOT NULL AND ymid <> ''`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS maya_unlock_expiry_idx ON maya_unlock_sessions(delivery_expires_at) WHERE delivery_expires_at IS NOT NULL`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS maya_earning_user_idx ON maya_earning_sessions(user_id, created_at DESC)`);
   }
+
+  async function telegram(method, body) {
+    if (!botToken) throw new Error('TELEGRAM_BOT_TOKEN is not configured');
+    const r = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || !data.ok) throw new Error(data.description || `Telegram ${method} failed`);
+    return data.result;
+  }
+
+  async function deliverVideo(session) {
+    const video = (await pool.query(`SELECT * FROM maya_videos WHERE id=$1 AND enabled=true`, [session.video_id])).rows[0];
+    if (!video) throw new Error('Video not found or disabled');
+    const user = (await pool.query(`SELECT id,telegram_id,username FROM users WHERE id=$1`, [session.user_id])).rows[0];
+    if (!user || !user.telegram_id) throw new Error('User Telegram account is not linked');
+    if (!video.telegram_file_id && !video.video_url) throw new Error('Video has no Telegram file ID or video URL');
+
+    const videoInput = video.telegram_file_id || video.video_url;
+    const result = await telegram('sendVideo', {
+      chat_id: String(user.telegram_id),
+      video: videoInput,
+      caption: `馃幀 ${video.title}\n\n鈴憋笍 唳忇 唳唳∴唳撪唳� ${video.delivery_ttl_seconds} 唳膏唳曕唳ㄠ唳� 唳Π唰� 唳膏唳唳傕唰嵿Π唳苦唳唳 唳唳涏 唳唳啷,
+      supports_streaming: true
+    });
+
+    const expires = new Date(Date.now() + Number(video.delivery_ttl_seconds) * 1000);
+    await pool.query(`
+      UPDATE maya_unlock_sessions
+      SET status='delivered', delivered_at=NOW(), delivery_message_id=$1,
+          delivery_expires_at=$2, updated_at=NOW()
+      WHERE id=$3
+    `, [result.message_id, expires, session.id]);
+
+    return { message_id: result.message_id, expires_at: expires };
+  }
+
+  // -------------------------
+  // ADMIN: video delivery + earning task controls
+  // -------------------------
+  function adminToken(req) {
+    return String(req.headers.authorization || '').replace(/^Bearer\s+/i,'').trim();
+  }
+  function adminSession(req) {
+    try {
+      const parts = adminToken(req).split('.');
+      if(parts.length !== 3) return null;
+      const [h,payload,sig] = parts;
+      const unsigned = `${h}.${payload}`;
+      const expected = crypto.createHmac('sha256', process.env.JWT_SECRET || '').update(unsigned).digest('base64').replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/g,'');
+      const a=Buffer.from(sig), b=Buffer.from(expected);
+      if(!a.length || a.length!==b.length || !crypto.timingSafeEqual(a,b)) return null;
+      const d=JSON.parse(Buffer.from(payload,'base64url').toString('utf8'));
+      if(d.staff!==true || !d.staffId || !d.exp || Math.floor(Date.now()/1000)>=d.exp) return null;
+      return d;
+    } catch { return null; }
+  }
+  function adminOnly(req,res,next){
+    if(!adminSession(req)) return res.status(401).json({ok:false,error:'Staff authentication required'});
+    next();
+  }
+
+  app.get('/api/admin/control/reward/videos', adminOnly, async (req,res)=>{
+    try{const r=await pool.query(`SELECT * FROM maya_videos ORDER BY id DESC`);res.json({ok:true,videos:r.rows});}
+    catch(e){res.status(500).json({ok:false,error:'Could not load reward videos'});}
+  });
+  app.post('/api/admin/control/reward/videos', adminOnly, async (req,res)=>{
+    try{
+      const r=await pool.query(`INSERT INTO maya_videos(title,description,telegram_file_id,video_url,thumbnail_url,required_ads,delivery_ttl_seconds,enabled) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,[
+        String(req.body.title||'Untitled Video'), req.body.description||null, req.body.telegram_file_id||null, req.body.video_url||null, req.body.thumbnail_url||null,
+        Math.max(1,Math.min(20,Number(req.body.required_ads||3))), Math.max(60,Math.min(172800,Number(req.body.delivery_ttl_seconds||600))), req.body.enabled!==false
+      ]);
+      res.status(201).json({ok:true,video:r.rows[0]});
+    }catch(e){res.status(500).json({ok:false,error:'Could not create reward video'});}
+  });
+  app.patch('/api/admin/control/reward/videos/:id', adminOnly, async (req,res)=>{
+    try{
+      const r=await pool.query(`UPDATE maya_videos SET title=COALESCE($1,title),description=COALESCE($2,description),telegram_file_id=COALESCE($3,telegram_file_id),video_url=COALESCE($4,video_url),thumbnail_url=COALESCE($5,thumbnail_url),required_ads=COALESCE($6,required_ads),delivery_ttl_seconds=COALESCE($7,delivery_ttl_seconds),enabled=COALESCE($8,enabled),updated_at=NOW() WHERE id=$9 RETURNING *`,[
+        req.body.title||null,req.body.description||null,req.body.telegram_file_id||null,req.body.video_url||null,req.body.thumbnail_url||null,
+        req.body.required_ads==null?null:Number(req.body.required_ads),req.body.delivery_ttl_seconds==null?null:Number(req.body.delivery_ttl_seconds),req.body.enabled===undefined?null:!!req.body.enabled,Number(req.params.id)
+      ]);
+      if(!r.rows[0])return res.status(404).json({ok:false,error:'Reward video not found'});
+      res.json({ok:true,video:r.rows[0]});
+    }catch(e){res.status(500).json({ok:false,error:'Could not update reward video'});}
+  });
+  app.delete('/api/admin/control/reward/videos/:id', adminOnly, async (req,res)=>{
+    try{const r=await pool.query(`DELETE FROM maya_videos WHERE id=$1 RETURNING id`,[Number(req.params.id)]);if(!r.rows[0])return res.status(404).json({ok:false,error:'Reward video not found'});res.json({ok:true});}
+    catch(e){res.status(500).json({ok:false,error:'Could not delete reward video'});}
+  });
+
+  app.get('/api/admin/control/reward/tasks', adminOnly, async (req,res)=>{
+    try{const r=await pool.query(`SELECT * FROM maya_reward_tasks ORDER BY id DESC`);res.json({ok:true,tasks:r.rows});}
+    catch(e){res.status(500).json({ok:false,error:'Could not load earning tasks'});}
+  });
+  app.post('/api/admin/control/reward/tasks', adminOnly, async (req,res)=>{
+    try{
+      const r=await pool.query(`INSERT INTO maya_reward_tasks(name,provider,zone_id,ad_type,reward_amount,daily_limit,cooldown_seconds,enabled) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,[
+        String(req.body.name||'Watch Ad & Earn'),String(req.body.provider||'monetag'),req.body.zone_id||null,String(req.body.ad_type||'rewarded_interstitial'),Math.max(0,Number(req.body.reward_amount||1)),Math.max(1,Number(req.body.daily_limit||20)),Math.max(0,Number(req.body.cooldown_seconds||30)),req.body.enabled!==false
+      ]);res.status(201).json({ok:true,task:r.rows[0]});
+    }catch(e){res.status(500).json({ok:false,error:'Could not create earning task'});}
+  });
+  app.patch('/api/admin/control/reward/tasks/:id', adminOnly, async (req,res)=>{
+    try{const r=await pool.query(`UPDATE maya_reward_tasks SET name=COALESCE($1,name),provider=COALESCE($2,provider),zone_id=COALESCE($3,zone_id),ad_type=COALESCE($4,ad_type),reward_amount=COALESCE($5,reward_amount),daily_limit=COALESCE($6,daily_limit),cooldown_seconds=COALESCE($7,cooldown_seconds),enabled=COALESCE($8,enabled),updated_at=NOW() WHERE id=$9 RETURNING *`,[
+      req.body.name||null,req.body.provider||null,req.body.zone_id||null,req.body.ad_type||null,req.body.reward_amount==null?null:Number(req.body.reward_amount),req.body.daily_limit==null?null:Number(req.body.daily_limit),req.body.cooldown_seconds==null?null:Number(req.body.cooldown_seconds),req.body.enabled===undefined?null:!!req.body.enabled,Number(req.params.id)
+    ]);if(!r.rows[0])return res.status(404).json({ok:false,error:'Earning task not found'});res.json({ok:true,task:r.rows[0]});}
+    catch(e){res.status(500).json({ok:false,error:'Could not update earning task'});}
+  });
+  app.delete('/api/admin/control/reward/tasks/:id', adminOnly, async (req,res)=>{
+    try{const r=await pool.query(`DELETE FROM maya_reward_tasks WHERE id=$1 RETURNING id`,[Number(req.params.id)]);if(!r.rows[0])return res.status(404).json({ok:false,error:'Earning task not found'});res.json({ok:true});}
+    catch(e){res.status(500).json({ok:false,error:'Could not delete earning task'});}
+  });
+
+  // Authenticated video list for the Mini App.
+  app.get('/api/reward/videos', authenticateRequest, async (req, res) => {
+    try {
+      const r = await pool.query(`SELECT id,title,description,thumbnail_url,required_ads,delivery_ttl_seconds FROM maya_videos WHERE enabled=true ORDER BY id DESC`);
+      res.json({ ok:true, videos:r.rows });
+    } catch (e) {
+      res.status(500).json({ ok:false, error:'Could not load reward videos' });
+    }
+  });
+
+  // Start the unlock flow. This does NOT trust a browser-side ad counter.
+  app.post('/api/reward/video/session', authenticateRequest, async (req, res) => {
+    try {
+      const userId = req.user.id;
+      const videoId = Number(req.body.video_id);
+      if (!Number.isInteger(videoId) || videoId <= 0) return res.status(400).json({ ok:false, error:'Valid video_id is required' });
+
+      const video = (await pool.query(`SELECT id,title,required_ads,enabled FROM maya_videos WHERE id=$1`, [videoId])).rows[0];
+      if (!video || !video.enabled) return res.status(404).json({ ok:false, error:'Video not found' });
+
+      const token = randomToken();
+      const ymid = `maya-unlock-${userId}-${Date.now()}-${randomToken(8)}`;
+      const expires = new Date(Date.now() + 20 * 60 * 1000);
+      const r = await pool.query(`
+        INSERT INTO maya_unlock_sessions(session_token,user_id,video_id,required_ads,expires_at)
+        VALUES($1,$2,$3,$4,$5) RETURNING id,session_token,video_id,required_ads,verified_ads,status,expires_at
+      `, [token,userId,videoId,video.required_ads,expires]);
+      res.status(201).json({ok:true,session:r.rows[0]});
+    } catch (e) {
+      console.error('Maya video session error:', e);
+      res.status(500).json({ok:false,error:'Could not start unlock session'});
+    }
+  });
+
+  app.get('/api/reward/video/session/:token', authenticateRequest, async (req,res) => {
+    try {
+      const r = await pool.query(`
+        SELECT s.id,s.video_id,s.session_token,s.ymid,s.required_ads,s.verified_ads,s.status,s.expires_at,s.delivered_at,s.delivery_expires_at,
+               v.title,v.description,v.thumbnail_url
+        FROM maya_unlock_sessions s JOIN maya_videos v ON v.id=s.video_id
+        WHERE s.session_token=$1 AND s.user_id=$2 LIMIT 1
+      `,[req.params.token,req.user.id]);
+      if(!r.rows[0]) return res.status(404).json({ok:false,error:'Unlock session not found'});
+      res.json({ok:true,session:r.rows[0]});
+    } catch(e){ res.status(500).json({ok:false,error:'Could not load unlock session'}); }
+  });
+
+  // Provider postback endpoint. Reward is granted only for valued/completed events.
+  // For Monetag, configure the postback to send reward_event_type=valued and a unique event identifier.
+  app.get('/api/reward/ad/postback', async (req,res) => {
+    try {
+      const provider = String(req.query.provider || 'monetag').toLowerCase();
+      const eventType = String(req.query.reward_event_type || req.query.event_type || '').toLowerCase();
+      const eventId = String(req.query.event_id || req.query.transaction_id || req.query.your_parameter || '').trim();
+      const ymid = String(req.query.ymid || '').trim();
+      const userId = req.query.user_id ? Number(req.query.user_id) : null;
+      const unlockToken = String(req.query.session || req.query.unlock_session || '').trim();
+
+      if (eventType !== 'valued') return res.status(200).send('ignored');
+      if (!eventId) return res.status(400).send('missing event_id');
+
+      const existing = await pool.query(`SELECT id FROM maya_ad_events WHERE provider=$1 AND event_id=$2 LIMIT 1`,[provider,eventId]);
+      if(existing.rows[0]) return res.status(200).send('duplicate');
+
+      let unlock = null;
+      if (unlockToken) {
+        unlock = (await pool.query(`SELECT * FROM maya_unlock_sessions WHERE session_token=$1 AND status='watching' LIMIT 1`,[unlockToken])).rows[0] || null;
+      } else if (ymid) {
+        unlock = (await pool.query(`SELECT * FROM maya_unlock_sessions WHERE (session_token=$1 OR ymid=$1) AND status='watching' LIMIT 1`,[ymid])).rows[0] || null;
+      }
+
+      if (unlock && unlock.expires_at > new Date()) {
+        await pool.query('BEGIN');
+        try {
+          await pool.query(`INSERT INTO maya_ad_events(provider,event_id,ymid,user_id,unlock_session_id,event_type) VALUES($1,$2,$3,$4,$5,$6)`,[provider,eventId,ymid,unlock.user_id,unlock.id,eventType]);
+          const next = await pool.query(`UPDATE maya_unlock_sessions SET verified_ads=verified_ads+1,updated_at=NOW() WHERE id=$1 AND status='watching' AND verified_ads < required_ads RETURNING *`,[unlock.id]);
+          const s=next.rows[0];
+          await pool.query('COMMIT');
+          if(s && s.verified_ads >= s.required_ads) {
+            try { await deliverVideo(s); } catch(deliveryError) {
+              console.error('Maya Telegram delivery error:',deliveryError);
+              await pool.query(`UPDATE maya_unlock_sessions SET status='delivery_failed',updated_at=NOW() WHERE id=$1`,[s.id]);
+            }
+          }
+        } catch(e){ await pool.query('ROLLBACK'); throw e; }
+        return res.status(200).send('accepted');
+      }
+
+      // Earning-session lookup by ymid.
+      if (ymid) {
+        const earn = (await pool.query(`
+          SELECT es.*,t.reward_amount,t.name task_name,t.daily_limit
+          FROM maya_earning_sessions es JOIN maya_reward_tasks t ON t.id=es.task_id
+          WHERE es.ymid=$1 AND es.status='watching' AND es.expires_at>NOW() LIMIT 1
+        `,[ymid])).rows[0];
+        if(earn) {
+          await pool.query('BEGIN');
+          try {
+            await pool.query(`INSERT INTO maya_ad_events(provider,event_id,ymid,user_id,event_type,reward_value) VALUES($1,$2,$3,$4,$5,$6)`,[provider,eventId,ymid,earn.user_id,eventType,earn.reward_amount]);
+            const ledger=await pool.query(`
+              INSERT INTO maya_reward_ledger(user_id,source,source_event_id,amount,metadata)
+              VALUES($1,'earning_ad',$2,$3,$4) ON CONFLICT(source,source_event_id) DO NOTHING RETURNING id
+            `,[earn.user_id,eventId,earn.reward_amount,JSON.stringify({provider,ymid,task_id:earn.task_id})]);
+            if(ledger.rows[0]) await pool.query(`UPDATE users SET balance=balance+$1,updated_at=NOW() WHERE id=$2`,[earn.reward_amount,earn.user_id]);
+            await pool.query(`UPDATE maya_earning_sessions SET status='completed',completed_at=NOW() WHERE id=$1`,[earn.id]);
+            await pool.query('COMMIT');
+          } catch(e){await pool.query('ROLLBACK');throw e;}
+          return res.status(200).send('rewarded');
+        }
+      }
+
+      // Keep event auditable even when it doesn't map to an active session.
+      await pool.query(`INSERT INTO maya_ad_events(provider,event_id,ymid,user_id,event_type) VALUES($1,$2,$3,$4,$5)`,[provider,eventId,ymid,userId,eventType]);
+      res.status(200).send('recorded');
+    } catch(e){ console.error('Maya ad postback error:',e); res.status(500).send('error'); }
+  });
+
+  // Client only asks the server to create an earning session; it cannot grant itself balance.
+  app.post('/api/reward/earning/session', authenticateRequest, async (req,res)=>{
+    try{
+      const taskId=Number(req.body.task_id);
+      const task=(await pool.query(`SELECT * FROM maya_reward_tasks WHERE id=$1 AND enabled=true`,[taskId])).rows[0];
+      if(!task)return res.status(404).json({ok:false,error:'Reward task not found'});
+      const todayCount=(await pool.query(`SELECT COUNT(*)::int AS n FROM maya_earning_sessions WHERE user_id=$1 AND task_id=$2 AND created_at>=CURRENT_DATE`,[req.user.id,taskId])).rows[0].n;
+      if(todayCount>=task.daily_limit)return res.status(429).json({ok:false,error:'Daily earning limit reached'});
+      const last=(await pool.query(`SELECT created_at FROM maya_earning_sessions WHERE user_id=$1 AND task_id=$2 ORDER BY id DESC LIMIT 1`,[req.user.id,taskId])).rows[0];
+      if(last){const elapsed=(Date.now()-new Date(last.created_at).getTime())/1000;if(elapsed<Number(task.cooldown_seconds||0))return res.status(429).json({ok:false,error:`Please wait ${Math.ceil(Number(task.cooldown_seconds)-elapsed)} seconds before the next earning ad`});}
+      const ymid=`maya-earn-${req.user.id}-${Date.now()}-${randomToken(8)}`;
+      const token=randomToken();
+      const expires=new Date(Date.now()+10*60*1000);
+      const r=await pool.query(`INSERT INTO maya_earning_sessions(session_token,user_id,task_id,ymid,expires_at) VALUES($1,$2,$3,$4,$5) RETURNING session_token,ymid,expires_at`,[token,req.user.id,taskId,ymid,expires]);
+      res.status(201).json({ok:true,session:r.rows[0],task:{id:task.id,name:task.name,provider:task.provider,zone_id:task.zone_id,ad_type:task.ad_type,reward_amount:task.reward_amount}});
+    }catch(e){res.status(500).json({ok:false,error:'Could not start reward ad'});}
+  });
+
+  app.get('/api/reward/tasks', async (req,res)=>{
+    try{
+      const r=await pool.query(`SELECT id,name,provider,zone_id,ad_type,reward_amount,daily_limit,cooldown_seconds FROM maya_reward_tasks WHERE enabled=true ORDER BY id`);
+      res.json({ok:true,tasks:r.rows});
+    }catch(e){res.status(500).json({ok:false,error:'Could not load reward tasks'});}
+  });
+
+  // Safe cleanup: expired unlock sessions are revoked and delivered Telegram messages are deleted when possible.
+  async function cleanupExpiredDeliveries(){
+    try{
+      const rows=await pool.query(`SELECT id,delivery_message_id,user_id FROM maya_unlock_sessions WHERE status='delivered' AND delivery_expires_at<=NOW() AND revoked_at IS NULL LIMIT 100`);
+      for(const s of rows.rows){
+        const u=(await pool.query(`SELECT telegram_id FROM users WHERE id=$1`,[s.user_id])).rows[0];
+        if(u?.telegram_id && s.delivery_message_id){
+          try{await telegram('deleteMessage',{chat_id:String(u.telegram_id),message_id:Number(s.delivery_message_id)});}catch(e){console.warn('Maya deleteMessage:',e.message);}
+        }
+        await pool.query(`UPDATE maya_unlock_sessions SET status='expired',revoked_at=NOW(),updated_at=NOW() WHERE id=$1`,[s.id]);
+      }
+      await pool.query(`UPDATE maya_unlock_sessions SET status='expired',updated_at=NOW() WHERE status='watching' AND expires_at<=NOW()`);
+      await pool.query(`DELETE FROM maya_earning_sessions WHERE status IN ('watching','completed') AND expires_at < NOW()-INTERVAL '1 day'`);
+    }catch(e){console.error('Maya reward cleanup error:',e);}
+  }
+  const timer=setInterval(cleanupExpiredDeliveries,60*1000);
+  timer.unref?.();
+
+  return { ensureRewardDatabase, cleanupExpiredDeliveries };
 }
 
-startServer();
+module.exports = { registerMayaRewardSystem };
+module.exports.registerMayaRewardSystem = registerMayaRewardSystem;
+module.exports.default = registerMayaRewardSystem;
