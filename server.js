@@ -76,21 +76,13 @@ const allowedOrigins = [
   "https://adcpm.netlify.app"
 ];
 
+// CORS is intentionally permissive here because the API uses its own
+// JWT / Telegram / admin authentication. This prevents Telegram Mini App,
+// Netlify preview, and future frontend domains from being blocked by CORS.
+// No cookie credentials are enabled.
 app.use(
   cors({
-    origin: function (origin, callback) {
-      if (!origin) {
-        return callback(null, true);
-      }
-
-      if (allowedOrigins.includes(origin)) {
-        return callback(null, true);
-      }
-
-      return callback(
-        new Error("CORS origin not allowed")
-      );
-    },
+    origin: true,
 
     methods: [
       "GET",
@@ -106,7 +98,9 @@ app.use(
       "Authorization",
       "X-Telegram-Init-Data",
       "X-Admin-Key"
-    ]
+    ],
+
+    optionsSuccessStatus: 204
   })
 );
 
