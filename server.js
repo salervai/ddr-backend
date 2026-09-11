@@ -14,9 +14,11 @@ const {
   registerAdminControlCenter
 } = require("./admin_control_center");
 
-const {
-  registerMayaRewardSystem
-} = require("./Maya_Reward_Delivery_System_V2");
+const mayaRewardModule = require("./Maya_Reward_Delivery_System_V2");
+const registerMayaRewardSystem =
+  mayaRewardModule.registerMayaRewardSystem ||
+  mayaRewardModule.default ||
+  mayaRewardModule;
 
 // ============================================================
 // APP
