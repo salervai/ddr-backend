@@ -309,7 +309,7 @@ function registerMayaRewardSystem({ app, pool, botToken, authenticateRequest }) 
     } catch(e){ res.status(500).json({ok:false,error:'Could not load unlock session'}); }
   });
 
-  // Provider postback endpoint. Reward is granted only for valued/completed events.
+  // Provider postback endpoint. Reward is granted only for verified reward-positive events (Monetag yes/valued).
   // Monetag's TMA postback macros do not require an event_id; for our design, each
   // rewarded ad receives its own unique ymid, so ymid is the idempotency key.
   // Set MONETAG_POSTBACK_SECRET in Render and configure the same static secret
@@ -317,7 +317,9 @@ function registerMayaRewardSystem({ app, pool, botToken, authenticateRequest }) 
   app.get('/api/reward/ad/postback', async (req,res) => {
     try {
       const provider = String(req.query.provider || 'monetag').toLowerCase();
-      const eventType = String(req.query.reward_event_type || req.query.event_type || '').toLowerCase();
+      const rewardEventType = String(req.query.reward_event_type || '').toLowerCase().trim();
+      const providerEventType = String(req.query.event_type || '').toLowerCase().trim();
+      const eventType = rewardEventType || providerEventType;
       const ymid = String(req.query.ymid || '').trim();
       const userId = req.query.user_id ? Number(req.query.user_id) : null;
       const unlockToken = String(req.query.session || req.query.unlock_session || '').trim();
@@ -331,7 +333,15 @@ function registerMayaRewardSystem({ app, pool, botToken, authenticateRequest }) 
         console.warn('MONETAG_POSTBACK_SECRET is not configured; postback endpoint is less protected.');
       }
 
-      if (eventType !== 'valued') return res.status(200).send('ignored');
+      // Monetag TMA can send reward_event_type=yes for a paid/rewardable event.
+      // Some integrations/docs may use valued instead. Accept only these two
+      // reward-positive values; impression/click/no are never treated as rewards.
+      if (provider === 'monetag' && !['yes','valued'].includes(rewardEventType)) {
+        return res.status(200).send('ignored');
+      }
+      if (provider !== 'monetag' && !['yes','valued'].includes(eventType)) {
+        return res.status(200).send('ignored');
+      }
       if (!ymid) return res.status(400).send('missing ymid');
       const eventId = String(req.query.event_id || req.query.transaction_id || ymid).trim();
 
