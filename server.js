@@ -20,6 +20,9 @@ const registerMayaRewardSystem =
   mayaRewardModule.default ||
   mayaRewardModule;
 
+const { registerMayaDynamicBuilder } =
+  require("./maya_dynamic_builder_backend");
+
 // ============================================================
 // APP
 // ============================================================
@@ -76,13 +79,21 @@ const allowedOrigins = [
   "https://adcpm.netlify.app"
 ];
 
-// CORS is intentionally permissive here because the API uses its own
-// JWT / Telegram / admin authentication. This prevents Telegram Mini App,
-// Netlify preview, and future frontend domains from being blocked by CORS.
-// No cookie credentials are enabled.
 app.use(
   cors({
-    origin: true,
+    origin: function (origin, callback) {
+      if (!origin) {
+        return callback(null, true);
+      }
+
+      if (allowedOrigins.includes(origin)) {
+        return callback(null, true);
+      }
+
+      return callback(
+        new Error("CORS origin not allowed")
+      );
+    },
 
     methods: [
       "GET",
@@ -98,9 +109,7 @@ app.use(
       "Authorization",
       "X-Telegram-Init-Data",
       "X-Admin-Key"
-    ],
-
-    optionsSuccessStatus: 204
+    ]
   })
 );
 
@@ -134,6 +143,12 @@ const mayaRewardSystem = registerMayaRewardSystem({
   pool,
   botToken: process.env.TELEGRAM_BOT_TOKEN,
   authenticateRequest
+});
+
+const mayaDynamicBuilder = registerMayaDynamicBuilder({
+  app,
+  pool,
+  jwtSecret: JWT_SECRET
 });
 
 // ============================================================
@@ -2861,6 +2876,10 @@ async function startServer() {
 
     await mayaRewardSystem.ensureRewardDatabase();
 
+    // Maya Dynamic Builder schema depends on the reward-video table,
+    // so run it after the reward system has created/migrated that table.
+    await mayaDynamicBuilder.ensureMayaDynamicBuilderDatabase();
+
     console.log(
       "Maya Reward / Video Delivery database ready"
     );
@@ -2899,6 +2918,10 @@ async function startServer() {
 
         console.log(
           "Maya Admin Control Center routes enabled"
+        );
+
+        console.log(
+          "Maya Dynamic Builder routes enabled"
         );
       }
     );
